@@ -68,3 +68,4 @@ h1{font-size:clamp(30px,6.4vw,58px);font-weight:600;letter-spacing:-.035em;margi
   .lb-prev{left:8px}
   .lb-next{right:8px}
 }
+/* 交互区域不产生选中高亮；输入缩略图点开放大，左右按钮切换 */
