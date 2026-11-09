@@ -90,7 +90,27 @@ python3 collage.py --selftest</code></pre>
 <p><img src="results/method_lab_motion.png" alt="运动主体 / 内点 / 深度图" loading="lazy"></p>
 <h3>6.4 速度、浏览器部署与相关论文</h3>
 <p><code>phase</code> 单对约 90ms，<a href="https://docs.opencv.org/4.x/d5/df5/tutorial_js_gui_features.html" target="_blank" rel="noopener">OpenCV.js</a> 原生支持 <code>phaseCorrelate</code>；配合 <code>seam</code> 或 <code>median</code> 融合即可，<strong>不必跑深度模型</strong>。若确实要做主体级 3D / 景深效果，再上 <code>onnx-community/depth-anything-v2-small</code> 的 int8 ONNX（26 MB，CPU ~0.7s/帧，WebGPU 更快），用 <a href="https://huggingface.co/docs/transformers.js" target="_blank" rel="noopener">transformers.js</a> 的 <code>depth-estimation</code> pipeline 或 ONNX Runtime Web 加载同一份权重。注意本实验里它只用于「剔近景匹配点」，而这件事 RANSAC 已经免费做完了。</p>
-<p>论文 / 项目索引（FE2E · Jasmine · D4RD · Marigold / V2 · Metric3D v2 · BetterDepth · Depth Anything V2 · MiDaS · PlaneToPBR · 3D/MC 工具链）见 <code>main</code> 分支 <code>龙猫/method_lab/report.md</code> 第 5 节，带会议年份与仓库链接。</p></div></div>
+<p>论文 / 项目索引（FE2E · Jasmine · D4RD · Marigold / V2 · Metric3D v2 · BetterDepth · Depth Anything V2 · MiDaS · PlaneToPBR · 3D/MC 工具链）见 <code>main</code> 分支 <code>龙猫/method_lab/report.md</code> 第 5 节，带会议年份与仓库链接。</p>
+<h3>6.5 深度估计为什么不是解决办法（附完整模型与一键命令）</h3>
+<p><strong>深度给的是「远近」，不是「动静」</strong>：静态前景树完全可能比运动的车更靠近镜头，所以「深度估计 → 剔近景 → 忽略运动主体」这条链本身就不成立。<code>method_lab.py --depth-audit</code> 用同一份权重实测：</p>
+<div class='table-wrap'><table><thead><tr><th>区域</th><th>深度均值</th><th>匹配点</th><th>按 70 分位剔「近景」时被剔掉</th></tr></thead><tbody><tr><td>静态前景树（不动）</td><td>3.980</td><td>484</td><td>418</td></tr><tr><td>运动汽车（要忽略的）</td><td>2.076</td><td>16</td><td>9</td></tr><tr><td>远景天空</td><td>0.463</td><td>83</td><td>0</td></tr></tbody></table></div>
+<p>树比车「近」近一倍；深度掩膜实际在剔<strong>静止的树</strong>（86% 的点），车上 16 个点只剔掉 9 个。<code>depth</code> 方法的方向自适应之所以在 <code>keep_far</code> / <code>keep_near</code> 之间 3:3 摇摆，正因为深度排序与「是否在运动」无关、本来就没有正确方向。识别运动主体要靠<strong>跨帧一致性</strong>（帧差 / 光流 / RANSAC 外点），不是单帧几何。</p>
+<p><img src="results/method_lab_depth_audit.png" alt="深度≠运动：静态树比车更近" loading="lazy"></p>
+<h4>模型完整规格</h4>
+<div class='table-wrap'><table><thead><tr><th>项</th><th>值</th></tr></thead><tbody><tr><td>HuggingFace 仓库</td><td><code>onnx-community/depth-anything-v2-small</code></td></tr><tr><td>权重文件</td><td><code>onnx/model_int8.onnx</code></td></tr><tr><td>原模型</td><td><code>depth-anything/Depth-Anything-V2-Small</code>（ViT-S 编码器 + DPT 头），Apache-2.0</td></tr><tr><td>大小 / sha256</td><td>27,258,801 B（26 MB） / <code>01aa7a23de3f4a0ee1a2bb9997e6918104c85a9f95dea46d27b9b3fb0c6b9001</code></td></tr><tr><td>输入</td><td><code>pixel_values</code> float32 <code>[1,3,518,518]</code>，RGB，ImageNet mean/std，bicubic resize 到 518×518</td></tr><tr><td>输出</td><td><code>predicted_depth</code> <code>[1,518,518]</code> 相对深度（实测值越大越近：树 3.98 &gt; 车 2.08 &gt; 天空 0.46）</td></tr><tr><td>推理</td><td>ONNX Runtime 1.31.1 CPU，约 0.5–0.7s/帧；浏览器用 transformers.js / ONNX Runtime Web（WebGPU fp16 / WASM 回退）</td></tr><tr><td>下载 URL</td><td><code>https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_int8.onnx</code></td></tr></tbody></table></div>
+<h4>一键下载与完整运行命令</h4>
+<p>从零到跑通（项目根目录，<strong>完整命令，不简写</strong>）：</p>
+<pre><code>uv venv /tmp/anime-venv
+uv pip install --python /tmp/anime-venv/bin/python opencv-python-headless numpy onnxruntime
+bash setup_depth.sh --check
+/tmp/anime-venv/bin/python method_lab.py 龙猫
+/tmp/anime-venv/bin/python method_lab.py 龙猫 --depth-audit</code></pre>
+<p><code>setup_depth.sh</code> 会下载上面的权重、校验字节数与 sha256；<code>--check</code> 额外用 ONNX Runtime 跑一次 518×518 随机输入，打印输入输出规格。等价的裸下载命令：</p>
+<pre><code>curl -L --fail -o models/depth_anything_v2_small_int8.onnx \
+  https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_int8.onnx</code></pre>
+<p>不下模型也能跑（跳过 <code>depth</code>，其余 6 种方法照常）：</p>
+<pre><code>/tmp/anime-venv/bin/python method_lab.py 龙猫 --no-depth
+/tmp/anime-venv/bin/python method_lab.py 龙猫 --quick</code></pre></div></div>
   <footer class="foot">由 <code>src/build_site.py</code> 从 <code>docs/拼接清理报告.md</code> 生成</footer>
 </main>
 </body>
