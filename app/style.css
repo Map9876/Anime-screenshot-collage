@@ -60,3 +60,4 @@ h1{font-size:clamp(30px,6.4vw,58px);font-weight:600;letter-spacing:-.035em;margi
   #hero{padding:6vh 5vw}
   .diag{font-size:11px}
 }
+/* 纯静态实现：无需构建步骤，Pages 直接托管本目录 */
