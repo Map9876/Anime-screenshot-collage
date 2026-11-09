@@ -3,6 +3,8 @@
 这个分支**只放静态网站**：完整对话（我说的 + AI 说的）、「用户怎么开发的?」开发日志，以及右下角的「只看我说」悬浮导航。
 项目本体在 `main` 分支。
 
+本项目由AI开发，全程聊天记录和提示词在 gh-pages分支的json文件，可直接导入codebuddy vscode插件使用进行二次开发，codebuddy cli或别的agent的话可能需要转换json一下。源仓库 https://cnb.cool/kfc50/sonypictures-poster
+
 ## 分支分工
 
 | 分支 | 内容 | 用途 |
