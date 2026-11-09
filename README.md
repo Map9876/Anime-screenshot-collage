@@ -4,6 +4,8 @@
 > `models/lama_fp32.onnx`（208 MB）走 Git LFS，克隆后先执行 `git lfs pull`。
 > 分支分工与「零配置一键生成 Pages」说明见 `gh-pages` 分支的 README。
 
+本项目由AI开发，全程聊天记录和提示词在 gh-pages分支的json文件，可直接导入codebuddy vscode插件使用进行二次开发，codebuddy cli或别的agent的话可能需要转换json一下。源仓库 https://cnb.cool/kfc50/sonypictures-poster
+
 ---
 
 # 垂直三段截图 → 拼接成一张完整图（OpenCV Stitcher）
