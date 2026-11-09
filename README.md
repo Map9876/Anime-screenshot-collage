@@ -98,6 +98,45 @@ Y 轴：`mean` / `median`（时序中值）/ `multiband` / `feather` / `seam`。
 | 融合怎么选 | `seam` 只保留**恰好一辆车**、固定台标 1 份、接缝台阶最低；`median` 更快但把车一并抹掉；`mean` / `feather` 残留 4 份台标 |
 | 真正的问题是什么 | 屏幕固定 OSD 水印跨帧重复，深度估计无效（OSD 没有深度）。「忽略主体」要分清：位移估计时忽略 / 融合时消除重复 / 是否保留一个主体 |
 
+### 三版出图：完整生成步骤与场景
+
+「刚好没车 / 恰好一辆车 / 四辆车」不是巧合，是几何决定的：斜向 pan 让各帧落在画布不同位置，车在帧内也在移动，所以**画布上任一像素最多只有 1 帧看到车，其余帧都是背景**。
+
+**执行的脚本**：`method_lab.py --subject-modes`（内部 `subject_modes()` 函数）。完整命令：
+
+```bash
+cd /workspace/anime
+uv venv /tmp/anime-venv
+uv pip install --python /tmp/anime-venv/bin/python opencv-python-headless numpy onnxruntime
+/tmp/anime-venv/bin/python method_lab.py 龙猫 --subject-modes
+```
+
+这一步**不需要深度模型**。生成过程全自动、无特调，没有任何写死的坐标或模板：
+
+1. `ts.auto_layout()`（SIFT + 纯平移 RANSAC）估计位置，`warp_stack()` 把 4 帧放到同一画布；
+2. `median_full()` 取跨帧中值得到背景共识，每帧与它差值 >45 的像素标为运动区；
+3. 排除所有运动区做加权平均 → `background_only.png`；
+4. 只取运动区**最大连通域**（车本体，自动滤掉台标/细线）贴回 → `one_subject.png`；
+5. 把每帧完整运动区都贴回 → `all_subjects.png`。
+
+| 输出文件 | 场景 |
+|---|---|
+| `龙猫/method_lab/background_only.png` | 纯背景重建，检查配准 / 黑边 / 接缝质量 |
+| `龙猫/method_lab/one_subject.png` | **观赏用最终图**：画面里恰好一辆车 |
+| `龙猫/method_lab/all_subjects.png` | **研究用**：4 帧车的位置与运动轨迹 |
+| `龙猫/method_lab/subject_masks.png` | 每帧检测到的车本体掩膜（调试 / 复现） |
+| `龙猫/method_lab/subject_modes.json` | 阈值、各帧运动/车本体像素数、贴回用的帧号 |
+
+观赏版去黑边，用项目现成的自动化清理流程（LaMa 补未覆盖区，非特调）：
+
+```bash
+/tmp/anime-venv/bin/python -c "import clean_stitched as cs; cs.clean('龙猫/method_lab/one_subject.png', '龙猫/method_lab/one_subject_clean.png', seam=False)"
+```
+
+→ `one_subject_clean.png`（2130×2061，黑区清零）；`background_only.png` / `all_subjects.png` 也可同样清理。
+
+**关于左上角水印：没有去除**。三版图里「猫屿工坊」台标和 bilibili 水印都保留。试过两种通用自动化检测（帧内坐标跨帧投票 / 帧间时变低+边缘强），前者因画布边缘覆盖帧数不足只抓到细线，后者把背景纹理大面积误判成 OSD、把画面填花；按「不做特调」原则都已撤回，代码里没有去水印分支，所以 README 里也没有去水印步骤。`osd_count()` 的左上角模板只用于数台标份数打分，**不参与出图**。
+
 ### 深度估计不是解决办法（已定量证伪）
 
 深度给的是**远近**，不是**动静**：静态前景树完全可能比运动的车更靠近镜头，所以「深度估计 → 剔近景 → 忽略运动主体」这条链本身就不成立。`--depth-audit` 用同一份权重实测：

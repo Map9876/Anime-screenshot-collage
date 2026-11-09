@@ -92,6 +92,40 @@
 - 固定 OSD 同理（台标在每帧屏幕坐标不动，拼接后按各帧位置重复）：`mean` / `multiband` / `feather` 残留 4 份，`median` 2 份，`seam` 1 份。深度估计对此无效——OSD 没有深度。
 - 所以「忽略主体」要分清三层：① **估计位移时**忽略（纯平移 RANSAC 已做到）；② **融合时**消除重复主体（`median` / `seam`）；③ 保留一个主体（只有 `seam`）。
 
+### 3.2 「刚好没车」是怎么实现的（三版可控出图）
+
+不是巧合，是几何决定的：斜向 pan 让各帧落在画布不同位置，车在帧内也在移动，所以**画布上任一像素最多只有 1 帧看到车，其余帧看到背景**。
+
+```bash
+/tmp/anime-venv/bin/python method_lab.py 龙猫 --subject-modes
+```
+
+`subject_modes()` 全流程自动，没有任何写死的坐标或模板：
+
+1. `ts.auto_layout()` 用 SIFT + 纯平移 RANSAC 估计各帧位置，`warp_stack()` 把 4 帧放到同一画布。
+2. `median_full()` 取跨帧中值得到**背景共识 ref**；每帧与 ref 差值 >45 的像素标为运动区。
+3. `background_only.png`：把每帧运动区从加权平均里排除 → **0 辆车**。
+4. `one_subject.png`：只取运动区**最大连通域**（车本体，自动滤掉台标/细线）贴回背景 → **恰好 1 辆车**。
+5. `all_subjects.png`：把每帧完整运动区都贴回 → **4 个位置的车**（会带同帧台标/细线）。
+
+| 输出 | 场景 |
+|---|---|
+| `background_only.png` | 纯背景重建，检查配准 / 黑边 / 接缝质量 |
+| `one_subject.png` | **观赏用最终图**：画面里恰好一辆车 |
+| `all_subjects.png` | **研究用**：4 帧车的位置与运动轨迹 |
+| `subject_masks.png` | 每帧检测到的车本体掩膜（调试 / 复现） |
+| `subject_modes.json` | 阈值、各帧运动像素数、车本体像素数、贴回用的帧号 |
+
+观赏版去黑边用的是项目现成的自动化清理流程（LaMa 补未覆盖区），不是针对这张图特调：
+
+```bash
+/tmp/anime-venv/bin/python -c "import clean_stitched as cs; cs.clean('龙猫/method_lab/one_subject.png', '龙猫/method_lab/one_subject_clean.png', seam=False)"
+```
+
+→ `one_subject_clean.png`（2130×2061，黑区清零）、`background_only.png` / `all_subjects.png` 也可以同样清理。
+
+**固定水印没有去除**：左上角台标与左下 bilibili 水印在三版图里都保留。试过两种通用自动化检测（帧内坐标跨帧投票 / 帧间时变低+边缘强），前者因画布边缘覆盖帧数不足只抓到细线，后者把背景纹理大面积误判成 OSD、把画面填花；按「不做特调」原则都已撤回，代码里没有去水印分支。`osd_count()` 里的左上角模板只用于数台标份数打分，**不参与出图**。
+
 ## 4. 速度与浏览器部署
 
 | 方法 | 单对估计 (ms) | 浏览器 JS | 备注 |

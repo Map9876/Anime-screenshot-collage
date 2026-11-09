@@ -13,6 +13,7 @@
     /tmp/anime-venv/bin/python method_lab.py 龙猫 --no-depth
     /tmp/anime-venv/bin/python method_lab.py 龙猫 --quick       # 只跑 3 种融合
     /tmp/anime-venv/bin/python method_lab.py 龙猫 --depth-audit # 验证「深度≠运动」
+    /tmp/anime-venv/bin/python method_lab.py 龙猫 --subject-modes # 出无车/一辆车/多辆车三版图
 
 模型完整下载命令（等价于一键脚本 setup_depth.sh）：
 
@@ -365,6 +366,93 @@ def fuse(ims, pos, method, stack, masks):
     raise ValueError(method)
 
 
+# ------------------------------------------------------------------ 主体模式
+def subject_modes(ims, pos, outdir, thr=45):
+    """显式控制运动主体在融合图里的数量：0 辆 / 恰好 1 辆 / 每帧各 1 辆。
+
+    原理（不是巧合）：斜向 pan 让各帧落在画布不同位置，运动主体在帧内也在移动，
+    所以「画布上某个像素」最多只有 1 帧看到车，其余帧看到的是背景。
+    取跨帧中值即得背景共识 ref；每帧与 ref 差异大的像素就是运动主体。
+    之后想留几辆车，就把几帧的运动区贴回背景即可。
+    """
+    stack, masks, offsets = warp_stack(ims, pos)
+    n = stack.shape[0]
+    cover = masks.sum(axis=0)
+    ref = median_full(stack, masks)
+
+    motions = []
+    for k in range(n):
+        d = np.abs(stack[k].astype(np.int16) - ref.astype(np.int16)).max(axis=2)
+        m = ((d > thr) & masks[k]).astype(np.uint8)
+        m = cv2.dilate(m, np.ones((5, 5), np.uint8)) & masks[k].astype(np.uint8)
+        motions.append(m > 0)
+
+    # 1) 无车：把每帧的运动像素从加权平均里排除；全被排除时用中值兜底
+    acc = np.zeros(ref.shape, np.float32)
+    wsum = np.zeros(ref.shape[:2] + (1,), np.float32)
+    for k in range(n):
+        keep = (masks[k] & ~motions[k]).astype(np.float32)[..., None]
+        acc += stack[k].astype(np.float32) * keep
+        wsum += keep
+    bg = np.where(wsum > 0, acc / np.maximum(wsum, 1e-6), ref.astype(np.float32))
+    bg = np.clip(bg, 0, 255).astype(np.uint8)
+
+    # 运动掩膜里还有台标 / 曝光细线；贴回时只取最大连通域（车本体）
+    def largest_component(m):
+        num, lab, stats, _ = cv2.connectedComponentsWithStats(
+            m.astype(np.uint8), connectivity=8)
+        if num <= 1:
+            return m
+        k = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+        return lab == k
+
+    subjects = [largest_component(m) for m in motions]
+    areas = [int(s.sum()) for s in subjects]
+    k0 = int(np.argmax(areas))
+
+    # 2) 恰好一辆车：把选中帧的车贴回背景
+    one = bg.copy()
+    sel = subjects[k0] & masks[k0]
+    one[sel] = stack[k0][sel]
+
+    # 3) 每帧各一辆：对照图用完整运动掩膜贴回，4 个位置的车都在
+    #    （会一并带出同帧台标/细线；只求「主体轨迹」可见，不求干净）
+    multi = bg.copy()
+    for k in range(n):
+        sel = motions[k] & masks[k]
+        multi[sel] = stack[k][sel]
+
+    outputs = {'background_only.png': bg, 'one_subject.png': one,
+               'all_subjects.png': multi}
+    for name, im in outputs.items():
+        cv2.imwrite(str(outdir / name), crop_valid(im, cover))
+
+    tiles = []
+    for k in range(n):
+        v = subjects[k].astype(np.uint8) * 255
+        small = cv2.resize(v, (500, int(v.shape[0] * 500 / v.shape[1])),
+                           interpolation=cv2.INTER_AREA)
+        tile = cv2.cvtColor(small, cv2.COLOR_GRAY2BGR)
+        cv2.putText(tile, 'frame %d  %d px' % (k, areas[k]), (10, 24),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        tiles.append(tile)
+    cv2.imwrite(str(outdir / 'subject_masks.png'), np.hstack(tiles))
+
+    res = {
+        'threshold': thr, 'frames': n,
+        'moving_px_per_frame': [int(m.sum()) for m in motions],
+        'subject_px_per_frame': areas,
+        'source_frame_for_one_subject': k0,
+        'outputs': list(outputs) + ['subject_masks.png'],
+        'note': '同一画布像素最多 1 帧看到车，其余帧是背景 → 跨帧中值即背景共识；'
+                'one_subject 只贴最大连通域（车本体），all_subjects 贴完整运动掩膜以显示 4 帧轨迹',
+        'osd': '固定台标 / bilibili 水印未去除；只做运动主体控制，不做任何特调',
+    }
+    (outdir / 'subject_modes.json').write_text(
+        json.dumps(res, ensure_ascii=False, indent=2), encoding='utf-8')
+    return res
+
+
 # ------------------------------------------------------------------ 评价
 def overlap_quality(stack, masks, edges):
     """MST 边上的重叠区一致性：背景分位差 + 高差异像素比例。"""
@@ -692,6 +780,49 @@ def write_report(path, ctx):
     L.append('- 所以「忽略主体」要分清三层：① **估计位移时**忽略（纯平移 RANSAC 已做到）；'
              '② **融合时**消除重复主体（`median` / `seam`）；③ 保留一个主体（只有 `seam`）。')
     L.append('')
+    L.append('### 3.2 「刚好没车」是怎么实现的（三版可控出图）')
+    L.append('')
+    L.append('不是巧合，是几何决定的：斜向 pan 让各帧落在画布不同位置，车在帧内也在移动，'
+             '所以**画布上任一像素最多只有 1 帧看到车，其余帧看到背景**。')
+    L.append('')
+    L.append('```bash')
+    L.append('/tmp/anime-venv/bin/python method_lab.py 龙猫 --subject-modes')
+    L.append('```')
+    L.append('')
+    L.append('`subject_modes()` 全流程自动，没有任何写死的坐标或模板：')
+    L.append('')
+    L.append('1. `ts.auto_layout()` 用 SIFT + 纯平移 RANSAC 估计各帧位置，`warp_stack()` 把 4 帧放到同一画布。')
+    L.append('2. `median_full()` 取跨帧中值得到**背景共识 ref**；每帧与 ref 差值 >45 的像素标为运动区。')
+    L.append('3. `background_only.png`：把每帧运动区从加权平均里排除 → **0 辆车**。')
+    L.append('4. `one_subject.png`：只取运动区**最大连通域**（车本体，自动滤掉台标/细线）贴回背景 → **恰好 1 辆车**。')
+    L.append('5. `all_subjects.png`：把每帧完整运动区都贴回 → **4 个位置的车**（会带同帧台标/细线）。')
+    L.append('')
+    L.append('| 输出 | 场景 |')
+    L.append('|---|---|')
+    L.append('| `background_only.png` | 纯背景重建，检查配准 / 黑边 / 接缝质量 |')
+    L.append('| `one_subject.png` | **观赏用最终图**：画面里恰好一辆车 |')
+    L.append('| `all_subjects.png` | **研究用**：4 帧车的位置与运动轨迹 |')
+    L.append('| `subject_masks.png` | 每帧检测到的车本体掩膜（调试 / 复现） |')
+    L.append('| `subject_modes.json` | 阈值、各帧运动像素数、车本体像素数、贴回用的帧号 |')
+    L.append('')
+    L.append('观赏版去黑边用的是项目现成的自动化清理流程（LaMa 补未覆盖区），'
+             '不是针对这张图特调：')
+    L.append('')
+    L.append('```bash')
+    L.append("/tmp/anime-venv/bin/python -c \"import clean_stitched as cs; "
+             "cs.clean('龙猫/method_lab/one_subject.png', "
+             "'龙猫/method_lab/one_subject_clean.png', seam=False)\"")
+    L.append('```')
+    L.append('')
+    L.append('→ `one_subject_clean.png`（2130×2061，黑区清零）、`background_only.png` / '
+             '`all_subjects.png` 也可以同样清理。')
+    L.append('')
+    L.append('**固定水印没有去除**：左上角台标与左下 bilibili 水印在三版图里都保留。'
+             '试过两种通用自动化检测（帧内坐标跨帧投票 / 帧间时变低+边缘强），'
+             '前者因画布边缘覆盖帧数不足只抓到细线，后者把背景纹理大面积误判成 OSD、把画面填花；'
+             '按「不做特调」原则都已撤回，代码里没有去水印分支。'
+             '`osd_count()` 里的左上角模板只用于数台标份数打分，**不参与出图**。')
+    L.append('')
     L.append('## 4. 速度与浏览器部署')
     L.append('')
     L.append('| 方法 | 单对估计 (ms) | 浏览器 JS | 备注 |')
@@ -825,6 +956,8 @@ def main():
     ap.add_argument('--no-depth', action='store_true', help='跳过深度方法')
     ap.add_argument('--depth-audit', action='store_true',
                     help='只做「深度≠运动」定量审计，不跑 35 组矩阵')
+    ap.add_argument('--subject-modes', action='store_true',
+                    help='只出「无车 / 恰好一辆车 / 每帧各一辆」三版融合图')
     a = ap.parse_args()
 
     p = Path(a.src)
@@ -852,6 +985,13 @@ def main():
         res = depth_audit(ims, DepthEstimator(a.model), outdir)
         print(json.dumps(res, ensure_ascii=False, indent=2), flush=True)
         print('产物:', outdir / 'depth_audit.json', outdir / 'depth_audit.png', flush=True)
+        return 0
+
+    if a.subject_modes:
+        pos, _ = ts.auto_layout(ims)          # 与 sift baseline 同一套布局
+        res = subject_modes(ims, pos, outdir)
+        print(json.dumps(res, ensure_ascii=False, indent=2), flush=True)
+        print('产物:', outdir, flush=True)
         return 0
 
     xnames = [x for x in ESTIMATORS if not (a.no_depth and x == 'depth')]

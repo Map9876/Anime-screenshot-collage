@@ -1,0 +1,25 @@
+{
+  "threshold": 45,
+  "frames": 4,
+  "moving_px_per_frame": [
+    119596,
+    89323,
+    55839,
+    67944
+  ],
+  "subject_px_per_frame": [
+    55776,
+    47073,
+    18020,
+    43377
+  ],
+  "source_frame_for_one_subject": 0,
+  "outputs": [
+    "background_only.png",
+    "one_subject.png",
+    "all_subjects.png",
+    "subject_masks.png"
+  ],
+  "note": "同一画布像素最多 1 帧看到车，其余帧是背景 → 跨帧中值即背景共识；one_subject 只贴最大连通域（车本体），all_subjects 贴完整运动掩膜以显示 4 帧轨迹",
+  "osd": "固定台标 / bilibili 水印未去除；只做运动主体控制，不做任何特调"
+}
