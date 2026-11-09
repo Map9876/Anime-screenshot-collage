@@ -73,7 +73,24 @@ python3 collage.py --selftest</code></pre>
 <h3>5.4 最新结果图</h3>
 <p><img src="results/亚丝娜镜头1_clean.png" alt="亚丝娜镜头1 清理后" loading="lazy"></p>
 <p><img src="results/亚丝娜镜头2_clean.png" alt="亚丝娜镜头2 清理后" loading="lazy"></p>
-<p><img src="results/龙猫_clean.png" alt="龙猫 清理后" loading="lazy"></p></div></div>
+<p><img src="results/龙猫_clean.png" alt="龙猫 清理后" loading="lazy"></p>
+<h2>6. 方法层 XY 对照：斜向 pan 与运动主体</h2>
+<p>新素材 <code>龙猫/</code>（4 帧，裁边后 2130×1156）是<strong>斜向上运镜、画面里有运动的汽车</strong>：背景随镜头平移，汽车自己也在动，另外还有屏幕固定位置的 bilibili 水印与左上角台标。这正是「是否需要主体识别 / 深度估计来忽略主体」的典型场景。</p>
+<p><code>method_lab.py</code> 做了 <strong>7 种位移估计 / 主体处理（X 轴）× 5 种融合策略（Y 轴）= 35 组</strong>对照，所有方法共用同一套 Kruskal 最大生成树布局，只有估计器不同。完整矩阵见 <code>main</code> 分支的 <code>龙猫/method_lab/results.json</code> 与 <code>report.md</code>。</p>
+<h3>6.1 X 轴：位移估计（含 x / y 两个分量）</h3>
+<div class='table-wrap'><table><thead><tr><th>方法</th><th>pos 跨度 x / y</th><th>相对 SIFT 偏差</th><th>单对耗时</th><th>结论</th></tr></thead><tbody><tr><td><code>sift</code>（现有算法）</td><td>271.8 / 912.9</td><td>0</td><td>1992ms</td><td>baseline</td></tr><tr><td><code>phase</code> 相位相关</td><td>271.2 / 913.5</td><td>0.88px</td><td>90ms</td><td><strong>快 22 倍，几乎无损</strong></td></tr><tr><td><code>ecc_init</code> phase 粗配准 + ECC 精修</td><td>271.4 / 912.3</td><td>0.60px</td><td>1111ms</td><td>必须粗配准</td></tr><tr><td><code>motionmask</code> 帧差剔主体</td><td>272.4 / 913.2</td><td>0.69px</td><td>881ms</td><td>与 baseline 一致</td></tr><tr><td><code>depth</code> Depth Anything V2 Small int8 剔近景</td><td>273.5 / 912.1</td><td>1.83px</td><td>1078ms + 722ms/帧</td><td>与 baseline 一致，<strong>多余</strong></td></tr><tr><td><code>orb</code></td><td>0 / 2</td><td>953px</td><td>523ms</td><td>失败：动画平坦区 <code>(0,0)</code> 假峰</td></tr><tr><td><code>ecc</code> 纯 ECC</td><td>0.2 / 0.2</td><td>952px</td><td>1395ms</td><td>失败：大位移超出收敛域</td></tr></tbody></table></div>
+<p>斜向运镜里 y 分量约是 x 的 3.4 倍；<code>phase</code> 与 SIFT 在 x / y 两个分量上几乎完全一致。ORB 在 6 个图片对里有 5 个收敛到 <code>(0,0)</code> 假峰（动画平坦区描述子重复，假峰内点率反而更高）；纯 ECC 从单位阵起步掉进 <code>(0,0)</code> 局部极小，合成位移测试确认初值必须是 <code>+d</code>。</p>
+<h3>6.2 运动主体：RANSAC 已经替我们做了「主体识别」</h3>
+<ul><li>运动 / 非背景区域只占有效画面 <strong>3.96%</strong>，而纯平移 RANSAC 的强峰有 1000+ 内点，来自背景。</li><li>绿色内点几乎不落在红色的车身上（<code>method_lab_motion.png</code> 左图）；车身特征点不符合全局平移，自动成为外点。</li><li>显式做「主体识别」的 <code>motionmask</code> 与 <code>depth</code> 相对 baseline 的最大布局偏差只有 <strong>0.69px / 1.83px</strong> → <strong>深度估计在这个任务上没有带来几何收益</strong>。</li></ul>
+<h3>6.3 Y 轴：融合决定主体与固定 OSD 的命运</h3>
+<p><code>OSD</code> = 融合图里检测到几次固定台标（台标在每帧屏幕坐标不动，拼接后按各帧位置重复出现）。</p>
+<div class='table-wrap'><table><thead><tr><th>融合</th><th>台标份数</th><th>接缝台阶</th><th>融合耗时</th><th>运动汽车</th></tr></thead><tbody><tr><td><code>mean</code></td><td>4</td><td>35.46</td><td>225ms</td><td>4 个位置平均成淡影</td></tr><tr><td><code>median</code> 时序中值</td><td>2</td><td>5.70</td><td>1301ms</td><td>被完全抹掉（背景最干净）</td></tr><tr><td><code>multiband</code></td><td>4</td><td>12.95</td><td>263ms</td><td>淡影</td></tr><tr><td><code>feather</code></td><td>4</td><td>37.61</td><td>124ms</td><td>淡影</td></tr><tr><td><code>seam</code> GraphCut</td><td><strong>1</strong></td><td><strong>5.64</strong></td><td>2937ms</td><td><strong>恰好一辆车</strong></td></tr></tbody></table></div>
+<p>所以「忽略主体」要分清三层：① <strong>估计位移时</strong>忽略（纯平移 RANSAC 已做到）；② <strong>融合时</strong>消除重复主体（<code>median</code> / <code>seam</code>）；③ 是否保留一个主体（只有 <code>seam</code>）。深度估计对固定 OSD 无效——OSD 没有深度。</p>
+<p><img src="results/method_lab_grid.png" alt="7x5 方法矩阵" loading="lazy"></p>
+<p><img src="results/method_lab_motion.png" alt="运动主体 / 内点 / 深度图" loading="lazy"></p>
+<h3>6.4 速度、浏览器部署与相关论文</h3>
+<p><code>phase</code> 单对约 90ms，<a href="https://docs.opencv.org/4.x/d5/df5/tutorial_js_gui_features.html" target="_blank" rel="noopener">OpenCV.js</a> 原生支持 <code>phaseCorrelate</code>；配合 <code>seam</code> 或 <code>median</code> 融合即可，<strong>不必跑深度模型</strong>。若确实要做主体级 3D / 景深效果，再上 <code>onnx-community/depth-anything-v2-small</code> 的 int8 ONNX（26 MB，CPU ~0.7s/帧，WebGPU 更快），用 <a href="https://huggingface.co/docs/transformers.js" target="_blank" rel="noopener">transformers.js</a> 的 <code>depth-estimation</code> pipeline 或 ONNX Runtime Web 加载同一份权重。注意本实验里它只用于「剔近景匹配点」，而这件事 RANSAC 已经免费做完了。</p>
+<p>论文 / 项目索引（FE2E · Jasmine · D4RD · Marigold / V2 · Metric3D v2 · BetterDepth · Depth Anything V2 · MiDaS · PlaneToPBR · 3D/MC 工具链）见 <code>main</code> 分支 <code>龙猫/method_lab/report.md</code> 第 5 节，带会议年份与仓库链接。</p></div></div>
   <footer class="foot">由 <code>src/build_site.py</code> 从 <code>docs/拼接清理报告.md</code> 生成</footer>
 </main>
 </body>
