@@ -1,3 +1,6 @@
 __pycache__/
 *.pyc
 .DS_Store
+
+# 第三方论文 / 项目代码快照：只在本机保留，不随项目提交
+methods/*/

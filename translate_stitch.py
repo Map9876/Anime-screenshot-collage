@@ -462,6 +462,10 @@ def stitch_files(files, outdir, mode='seam', photometry=True, demo=False):
     返回 dict：stitched / raw / seam / n_frames / layout。
     raw 是**未裁边**的原始画布，供 clean_stitched.py 做黑区清理；所有模式都写。
     """
+    # CLI 传进来的是 'auto'/'on'/'off' 字符串；不先归一化，bool('off') 会误判为 True
+    if isinstance(photometry, str):
+        photometry = {'auto': 'auto', 'on': True, 'off': False}.get(
+            photometry.lower(), True)
     os.makedirs(outdir, exist_ok=True)
     files = [f for f in files if not any(k in os.path.basename(f) for k in SKIP_OUTPUTS)]
     assert files, "no image files found"

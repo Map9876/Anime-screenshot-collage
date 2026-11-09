@@ -63,6 +63,33 @@ python3 collage.py --selftest                  # 曝光补偿合成自检，不�
 
 镜头2 自动**跳过**是关键：它的帧间差异主要是内容/水印而不是曝光，硬套逐帧补偿反而放大局部台阶（8.86 > 2.00）。三组素材黑区全部清零，说明 A/B 判据和清理流程都不依赖特定图。
 
+## 方法层：斜向 pan + 运动主体的多方法 XY 对照
+
+`龙猫/` 是一个斜向上运镜、**画面里有运动的汽车**的镜头，用来回答「pan 镜头里背景移动、主体也移动，是否需要主体识别 / 深度估计」。`method_lab.py` 跑了 **7 种位移估计 / 主体处理 × 5 种融合策略 = 35 组**：
+
+```bash
+python3 method_lab.py 龙猫           # 需要 opencv-python-headless numpy onnxruntime
+python3 method_lab.py 龙猫 --quick   # 只跑 mean / median / seam
+python3 method_lab.py 龙猫 --no-depth
+```
+
+X 轴：`sift`（现有算法）、`orb`、`phase`（相位相关）、`ecc`、`ecc_init`（phase 粗配准 + ECC 精修）、`motionmask`（帧差剔主体）、`depth`（Depth Anything V2 Small int8 ONNX 剔近景）。
+Y 轴：`mean` / `median`（时序中值）/ `multiband` / `feather` / `seam`。
+
+完整表格见 `龙猫/method_lab/report.md`、`results.json`、`grid.png`、`motion_analysis.png`。
+
+| 问题 | 结论 |
+|---|---|
+| 现有算法能拼运动主体吗 | **能**。纯平移 RANSAC 自动把汽车当外点剔除，拼接结果无重影；`motionmask` / `depth` 与 baseline 的布局偏差只有 0.69px / 1.83px → **深度估计在这个任务上是多余的** |
+| 什么最快、能上浏览器 JS | `phase` 单对约 90ms，比 SIFT 快 **22 倍**，位移偏差 0.88px；OpenCV.js 原生支持 `phaseCorrelate` |
+| 哪些方法会失败 | ORB 在动画平坦区收敛到 `(0,0)` 假峰（6 对里 5 对）；纯 ECC 大位移超出收敛域，必须 phase 粗配准 |
+| 融合怎么选 | `seam` 只保留**恰好一辆车**、固定台标 1 份、接缝台阶最低；`median` 更快但把车一并抹掉；`mean` / `feather` 残留 4 份台标 |
+| 真正的问题是什么 | 屏幕固定 OSD 水印跨帧重复，深度估计无效（OSD 没有深度）。「忽略主体」要分清：位移估计时忽略 / 融合时消除重复 / 是否保留一个主体 |
+
+相关论文与项目（FE2E · Jasmine · D4RD · Marigold · Metric3D v2 · BetterDepth · Depth Anything V2 · MiDaS · transformers.js · 3D/MC 工具链）索引见 `龙猫/method_lab/report.md` 第 5 节。第三方仓库本机克隆在 `anime/methods/`，由 `.gitignore` 排除、不随项目提交。
+
+> `method_lab.py` 只跑到融合（所以 `黑区%` 仍是原始画布的留白）；真实出图仍走 `collage.py` 的 LaMa 清理阶段。
+
 ---
 
 # 垂直三段截图 → 拼接成一张完整图（OpenCV Stitcher）
