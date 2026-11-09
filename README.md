@@ -14,9 +14,41 @@
 | 「用户怎么开发的?」开发日志 | https://map9876.github.io/Anime-screenshot-collage/devlog.html |
 | 同上的 Markdown 版 | [devlog.md](devlog.md) |
 
-> 站点已上线，Pages 源为 **`gh-pages` 分支 / `/`**（创建该分支时 GitHub 自动开启）。
-> `.github/workflows/sync-gh-pages.yml` 会在每次推送 `main` 后自动同步到 `gh-pages`，无需手动维护。
-> 若日后 Pages 被关闭，在 **Settings → Pages → Build and deployment → Source** 选 `Deploy from a branch` → `gh-pages` / `root` 即可。
+> 站点已上线，Pages 源为 **`gh-pages` 分支 / `/`**（推这个分支时 GitHub 自动开启）。
+> 一键复现方法见下节；**不需要进 Settings 改 source、不需要配 GitHub Actions、不需要把 `main` 设为发布源**。
+> 仓库里附带的 `.github/workflows/sync-gh-pages.yml` 只是可选的自动同步（已开箱即用，删掉也不影响站点）。
+
+## 一键生成 GitHub Pages（零配置）
+
+核心就一句话：**推一个 `gh-pages` 分支，GitHub 会自动创建并发布 Pages**。
+这是唯一需要的操作，Settings 里什么都不用点，也不需要任何 workflow。
+
+```bash
+git remote add origin https://github.com/<用户名>/<仓库名>.git
+git push -u origin main
+
+# ↓ 这一行就是「一键」：自动开启 Pages，站点立刻出现在
+#   https://<用户名>.github.io/<仓库名>/
+git push origin main:refs/heads/gh-pages
+```
+
+之后改了 `index.html` / 重新生成了对话网页，再推一次就会更新站点：
+
+```bash
+git push origin main                       # 推代码
+git push origin main:refs/heads/gh-pages   # 推站点（main 是 gh-pages 的祖先，普通快进，无需 --force）
+```
+
+为什么这样最省事：
+
+| 常见做法 | 需要用户做的事 |
+|---|---|
+| `main` / `root` 作源 | 进 Settings → Pages 手动选 source（本仓库的细粒度 PAT 还因缺 `pages:write` 权限调不动 API） |
+| GitHub Actions 部署 | 配 workflow、`pages: write` 权限、artifact 上传 |
+| **推 `gh-pages` 分支** | **零配置**，推完即上线，且 `main` 可以保持纯粹 |
+
+仓库里放 `.nojekyll` 是为了让 Pages 原样提供 `assets/`、`data/` 等文件（不被 Jekyll 吞掉）。
+`.github/workflows/sync-gh-pages.yml` 只是把上面第二条 `git push` 自动化了，**属于可选便利，不是必要条件**。
 
 ### 右下角悬浮导航怎么用
 
@@ -51,11 +83,25 @@
 │   └── latest_user_message.txt            # 导出文件之后追加的最新一条（已脱敏）
 ├── docs/拼接清理报告.md           # 拼接与清理的技术报告
 ├── results/                       # 两张最终清理图
-└── src/
-    ├── translate_stitch.py        # 纯平移拼接（SIFT + RANSAC + GraphCut 接缝）
-    ├── clean_stitched.py          # 黑块清理 + 接缝曝光修复 + LaMa 补洞
-    └── build_site.py              # 对话导出 → 静态网站生成器
+├── src/                           # 三个核心脚本（从 anime/ 摘出的可读副本）
+│   ├── translate_stitch.py        # 纯平移拼接（SIFT + RANSAC + GraphCut 接缝）
+│   ├── clean_stitched.py          # 黑块清理 + 接缝曝光修复 + LaMa 补洞
+│   └── build_site.py              # 对话导出 → 静态网站生成器
+├── anime/                         # ★ 完整原目录，原样整包推送（281 MB / 50 个文件）
+│   ├── 亚丝娜镜头1/ 亚丝娜镜头2/  # 原始截图 + 每一版中间产物 + 最终 clean 图
+│   ├── models/lama_fp32.onnx      # LaMa 修补模型（208 MB，走 Git LFS）
+│   ├── README.md                  # 完整实验记录（Stitcher 畸变、APAP、裁剪鲁棒性、普适性测试…）
+│   ├── translate_stitch.py / clean_stitched.py / lama_inpaint.py
+│   ├── apap.py / diag.py / test_crops.py / translate_stitch_smooth.py
+│   └── stitched_*.png / baseline_global.png / compare.png / synth_*.png …
+├── .gitattributes                 # *.onnx filter=lfs（GitHub 单文件硬上限 100 MB）
+└── .nojekyll                      # 让 Pages 原样提供 assets/ 与 data/
 ```
+
+> `anime/` 是工作区 `/workspace/anime` 的**逐文件副本**，`src/` 只是三个主脚本的便捷副本，便于不翻目录就能看。
+> 脚本保留了工作区原貌（`MODEL` 与 `root` 仍是 `/workspace/anime/...` 绝对路径），换机器运行前改成
+> `anime/models/lama_fp32.onnx` 即可；克隆后需 `git lfs pull` 才会取回 208 MB 的模型实体
+> （GitHub Pages 只用静态资源，不受影响）。
 
 ## 复现
 
