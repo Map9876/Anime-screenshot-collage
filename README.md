@@ -14,7 +14,9 @@
 | 「用户怎么开发的?」开发日志 | https://map9876.github.io/Anime-screenshot-collage/devlog.html |
 | 同上的 Markdown 版 | [devlog.md](devlog.md) |
 
-> 首次推送后需在仓库 **Settings → Pages → Build and deployment → Source: `main` / `root`** 开启（或由脚本调用 API 开启）。
+> 站点已上线，Pages 源为 **`gh-pages` 分支 / `/`**（创建该分支时 GitHub 自动开启）。
+> `.github/workflows/sync-gh-pages.yml` 会在每次推送 `main` 后自动同步到 `gh-pages`，无需手动维护。
+> 若日后 Pages 被关闭，在 **Settings → Pages → Build and deployment → Source** 选 `Deploy from a branch` → `gh-pages` / `root` 即可。
 
 ### 右下角悬浮导航怎么用
 
