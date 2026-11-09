@@ -823,6 +823,16 @@ def write_report(path, ctx):
              '按「不做特调」原则都已撤回，代码里没有去水印分支。'
              '`osd_count()` 里的左上角模板只用于数台标份数打分，**不参与出图**。')
     L.append('')
+    L.append('用 `osd_count()` 实测：`seam` 版 1 份台标，`one_subject_clean.png` 2 份'
+             '（1 份清晰 + 1 份被加权平均稀释成半透明），`all_subjects.png` 3 份。'
+             '份数减少不是识别后删除：台标随各帧落在画布不同位置，同一画布像素最多 1 帧有台标，'
+             '跨帧中值 / 排除运动区的加权平均自然把它滤淡，`largest_component()` 也只贴回车本体。'
+             '程序对「什么是 logo」无知、无状态、无感知。')
+    L.append('')
+    L.append('**本轮定稿**：4 张输入图、三版输出图、`one_subject_clean.png`、完整运行命令、'
+             '固定参数与 sha256 校验清单见项目根目录 `README.md` 的「one_subject 定稿」一节；'
+             '该节列出的文件名永久指向当前内容，后续优化一律写新输出名、不覆盖。')
+    L.append('')
     L.append('## 4. 速度与浏览器部署')
     L.append('')
     L.append('| 方法 | 单对估计 (ms) | 浏览器 JS | 备注 |')

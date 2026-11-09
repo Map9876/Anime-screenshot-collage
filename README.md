@@ -135,7 +135,88 @@ uv pip install --python /tmp/anime-venv/bin/python opencv-python-headless numpy 
 
 → `one_subject_clean.png`（2130×2061，黑区清零）；`background_only.png` / `all_subjects.png` 也可同样清理。
 
-**关于左上角水印：没有去除**。三版图里「猫屿工坊」台标和 bilibili 水印都保留。试过两种通用自动化检测（帧内坐标跨帧投票 / 帧间时变低+边缘强），前者因画布边缘覆盖帧数不足只抓到细线，后者把背景纹理大面积误判成 OSD、把画面填花；按「不做特调」原则都已撤回，代码里没有去水印分支，所以 README 里也没有去水印步骤。`osd_count()` 的左上角模板只用于数台标份数打分，**不参与出图**。
+**关于左上角水印：没有去除，也没有任何去水印代码**。用 `osd_count()`（左上角台标模板，`TM_CCOEFF_NORMED ≥ 0.70`）实测：
+
+| 图 | 台标命中份数 | 说明 |
+|---|---|---|
+| 单帧输入 | 1 | 对照基准 |
+| `龙猫/translate_stitched_clean.png`（`seam`） | 1 | 图割接缝在该区域只从一帧取像素 |
+| `background_only.png` / `one_subject.png` | 2 | 1 份清晰 + 1 份半透明 |
+| `one_subject_clean.png` | 2 | 同上，清理只补黑区、不改内容 |
+| `all_subjects.png` | 3 | 贴回完整运动掩膜会顺带贴回台标 |
+
+`one_subject_clean.png` 里那份清晰台标在 `(8,8)`（分数 0.866），半透明那份在 `(88,276)`（分数 0.902），其余候选 <0.60 是背景纹理虚警。所以「4 份台标变少」**不是识别后删除**，而是三个通用算子的副作用，程序对「什么是 logo」完全无知、无状态、无感知：
+
+1. 台标在每帧屏幕坐标不动，warp 到画布后落在 4 个不同位置；任一画布位置的台标只出现在 1 帧，其余帧是背景 → `median_full()` 跨帧中值把它当离群值滤掉；
+2. `one_subject` 的背景是「排除运动区的加权平均」，残留台标按覆盖帧数被稀释成半透明；`largest_component()` 只贴回车本体，不把其它台标贴回来；
+3. `clean_stitched.clean()` 只补未覆盖黑区，不碰画面内容。
+
+试过两种通用自动化检测（帧内坐标跨帧投票 / 帧间时变低+边缘强），前者因画布边缘覆盖帧数不足只抓到细线，后者把背景纹理大面积误判成 OSD、把画面填花；按「不做特调」原则都已撤回，代码里没有去水印分支，所以 README 里也没有去水印步骤。`osd_count()` 的左上角模板只用于数台标份数打分，**不参与出图**。剩下的 logo 不再处理。
+
+### one_subject 定稿：输入 / 输出 / 命令 / 校验
+
+**这一版是定稿，下面的文件名永久指向本节 sha256 对应的内容。** 不引入版本号机制：后续持续优化时算法或结果若有变化，一律写到**新的输出文件名**（例如 `one_subject_next.png`），不得覆盖本节列出的定稿文件；确需替换时必须同步更新本节 sha256 与 `subject_modes.json`。持续开发和结果可复现因此互不干扰。
+
+**输入图片**（`龙猫/` 下 4 张，均 2130×1200；`ts.discover_images()` 自动发现、顺序任意，`ts.crop_black_border()` 自动裁边成 2130×1156）：
+
+| # | 文件 | sha256 |
+|---|---|---|
+| 0 | `龙猫/4308817942050722.png` | `17869ad29b33640fcccc3624c25bde004af47be2f7bb86525f6426f7b80722fc` |
+| 1 | `龙猫/4518317942050762.png` | `000b8215c678e0760db21978e01c90755416e36445116b995cd5346a77d00c89` |
+| 2 | `龙猫/4625517942050782.png` | `869ec61f62f1f9cfc04a4589309f5fd75096024f4e1c519b32d7c37094883cb6` |
+| 3 | `龙猫/4759017942050812.png` | `e7646b018424cca77bd71e0a1e61805be99af06ebbc2da06852110b02b8754a6` |
+
+![输入帧 0](龙猫/4308817942050722.png)
+![输入帧 1](龙猫/4518317942050762.png)
+![输入帧 2](龙猫/4625517942050782.png)
+![输入帧 3](龙猫/4759017942050812.png)
+
+**输出图片**（全部在 `龙猫/method_lab/`）：
+
+| 文件 | 尺寸 | sha256 | 场景 |
+|---|---|---|---|
+| `one_subject_clean.png` | 2130×2061 | `76a61b643737f510cb2fa06defc44aba1ff92cbbb5fe78c02d3e174cb6b96240` | **观赏用定稿**：恰好一辆车、黑区清零 |
+| `one_subject.png` | 2402×2069 | `d5b510955bb497d1f4ebf4f0f0f9cf08c35ba57cbd92686149cc34cd65284560` | 未清理的原始融合画布 |
+| `background_only.png` | 2402×2069 | `0169d27988f977e95c26d1108c52d01b970f406eefab6bcd95147584e254127e` | 研究用：0 辆车 |
+| `all_subjects.png` | 2402×2069 | `c8994f5fa7e50e295c17e41c8a9c5a9be720a9e78a0d976ef284ea9ef5115d81` | 研究用：4 帧车轨迹 |
+| `subject_masks.png` | 掩膜拼图 | `b04d3471f38e47479ddba51cb929c9c143a7da4511d46f86c3c7f1d815af8125` | 调试：每帧最大连通域车本体 |
+| `subject_modes.json` | — | `9bfd66f08904c72b8053f56ff337abe0224716004142966c9afc6748e230321a` | 参数与逐帧统计 |
+
+![观赏用定稿：恰好一辆车](龙猫/method_lab/one_subject_clean.png)
+![原始融合画布 one_subject](龙猫/method_lab/one_subject.png)
+![纯背景 background_only](龙猫/method_lab/background_only.png)
+![四帧轨迹 all_subjects](龙猫/method_lab/all_subjects.png)
+![车本体掩膜 subject_masks](龙猫/method_lab/subject_masks.png)
+
+**从零到出图的完整命令**（项目根目录，`--subject-modes` 不需要深度模型）：
+
+```bash
+cd /workspace/anime
+uv venv /tmp/anime-venv
+uv pip install --python /tmp/anime-venv/bin/python opencv-python-headless numpy onnxruntime
+/tmp/anime-venv/bin/python method_lab.py 龙猫 --subject-modes
+/tmp/anime-venv/bin/python -c "import clean_stitched as cs; cs.clean('龙猫/method_lab/one_subject.png', '龙猫/method_lab/one_subject_clean.png', seam=False)"
+```
+
+调用链：`ts.auto_layout()`（SIFT + 纯平移 RANSAC）→ `warp_stack()` → `median_full()` → `subject_modes(thr=45)` → `clean_stitched.clean(seam=False)`。自动参数（读自 `subject_modes.json`）：`threshold=45`、`frames=4`、`source_frame_for_one_subject=0`、`moving_px_per_frame=[119596, 89323, 55839, 67944]`、`subject_px_per_frame=[55776, 47073, 18020, 43377]`；选第 0 帧不是手写，是 `argmax(最大连通域面积)` 自动得出。
+
+**一键校验**（任何定稿文件被改动会立刻报 `FAILED`）：
+
+```bash
+cd /workspace/anime
+sha256sum -c <<'EOF'
+17869ad29b33640fcccc3624c25bde004af47be2f7bb86525f6426f7b80722fc  龙猫/4308817942050722.png
+000b8215c678e0760db21978e01c90755416e36445116b995cd5346a77d00c89  龙猫/4518317942050762.png
+869ec61f62f1f9cfc04a4589309f5fd75096024f4e1c519b32d7c37094883cb6  龙猫/4625517942050782.png
+e7646b018424cca77bd71e0a1e61805be99af06ebbc2da06852110b02b8754a6  龙猫/4759017942050812.png
+76a61b643737f510cb2fa06defc44aba1ff92cbbb5fe78c02d3e174cb6b96240  龙猫/method_lab/one_subject_clean.png
+d5b510955bb497d1f4ebf4f0f0f9cf08c35ba57cbd92686149cc34cd65284560  龙猫/method_lab/one_subject.png
+0169d27988f977e95c26d1108c52d01b970f406eefab6bcd95147584e254127e  龙猫/method_lab/background_only.png
+c8994f5fa7e50e295c17e41c8a9c5a9be720a9e78a0d976ef284ea9ef5115d81  龙猫/method_lab/all_subjects.png
+b04d3471f38e47479ddba51cb929c9c143a7da4511d46f86c3c7f1d815af8125  龙猫/method_lab/subject_masks.png
+9bfd66f08904c72b8053f56ff337abe0224716004142966c9afc6748e230321a  龙猫/method_lab/subject_modes.json
+EOF
+```
 
 ### 深度估计不是解决办法（已定量证伪）
 
@@ -174,6 +255,26 @@ curl -L --fail -o models/depth_anything_v2_small_int8.onnx \
 ```
 
 相关论文与项目（FE2E · Jasmine · D4RD · Marigold · Metric3D v2 · BetterDepth · Depth Anything V2 · MiDaS · transformers.js · 3D/MC 工具链）索引见 `龙猫/method_lab/report.md` 第 5 节。第三方仓库本机克隆在 `anime/methods/`，由 `.gitignore` 排除、不随项目提交。
+
+### 后续路线：整片视频 → 镜头 → 适用移动镜头 → 长图
+
+参考 B 站「动画演出分析工具」的两张截图（`Screenshot_20261109_181903_com_bilibili_app_in_MediaViewerActivity.jpg`：CUT 列表 + 预览 + 时间轴；`Screenshot_20261109_181911_com_bilibili_app_in_MediaViewerActivity.jpg`：长图上叠多色矩形框 + 一根从首帧指向末帧中心的黄色箭头，右侧是 PAN Up / Down / Left / Right / Dec PAN / SUPER PAN 分类）。视觉层确实只是「框 + 箭头」，属于比较简陋、本身价值有限的一层；真正有用的是它背后的结构化数据，以及把「可用镜头」批量挑出来产出漂亮长图。所以不做重客户端：服务端异步出缩略图 + 一份 JSON，手机端面板 / 网页端按数据画 SVG 即可。
+
+规划的数据流（尚未实现，先固定契约）：
+
+1. 输入完整视频 → `ffmpeg` 切镜头（硬切用 `select='gt(scene,0.4)'` 基线；渐变/误检多时换 TransNetV2）；
+2. 每个镜头抽首尾帧，用**现成的** `phaseCorrelate` / 纯平移 RANSAC 内点率判定「是否为适用的平移镜头」：内点率高、位移向量方向一致 → 适用。这一步零额外模型；
+3. 适用的镜头走 `collage.py` 合并，得到一批好看的长图；
+4. 同时导出 `layout.json`：每帧 bbox（`x,y,w,h` + 颜色）、`first_center` → `last_center`、`direction`（按首尾中心 `dy` 符号自动归 `up` / `down`，`dx` 同理给 `left` / `right`）、`frames`、`fit_score`。前端用 SVG 画彩色框和那根箭头，手机端只下数据不下图。
+
+**两个检测仓库的轻量化实测**（已克隆到 `anime/methods/`，`.gitignore` 排除，不随项目提交）：
+
+| 仓库 | 实际用途 | 体积 | 依赖 / 权重 | 结论 |
+|---|---|---|---|---|
+| `SWHL/TransitionDetect` | TransNetV2 转场检测 + 自动切镜头，返回 `[[start_frame, end_frame], ...]` | 59 MB（30 MB `.pth` + 29 MB `.git`） | `torch`、`ffmpeg-python`、PyYAML、requests、numpy；权重随包、CPU 可跑、输入缩到 48×27 | **唯一值得接的一层**，但模型本身很轻、依赖很重。为它单独装 torch + 系统 ffmpeg 不划算：先走 ffmpeg scene 基线，误检多再把它当可选后端 |
+| `FudanCVL/SAAS` | 跨镜头半监督视频目标分割（SAM2 扩展，AAAI 2026），**不是镜头切分/类型分类** | 37 MB（纯代码与示例图，仓库内无任何权重） | torch 2.7 + CUDA、需编译 `lib_tree_filter` CUDA 扩展、权重另行下载（`SAAS_b+_ytvos_tma.pt`） | **轻量化维度直接排除**：任务不对口、权重未随仓库发布、必须 GPU、安装要编译 |
+
+本机 `/tmp/anime-venv` 只有 `opencv-python-headless / numpy / onnxruntime`，没有 torch，系统也没有 ffmpeg，因此这两个仓库目前只做静态评估、未接入主流程。**判定「是否适用」不需要新模型**：已有的位移估计内点率就是现成判据。
 
 > `method_lab.py` 只跑到融合（所以 `黑区%` 仍是原始画布的留白）；真实出图仍走 `collage.py` 的 LaMa 清理阶段。
 
