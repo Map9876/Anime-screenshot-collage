@@ -118,6 +118,8 @@ def load_turns():
 # ---------------------------------------------------------------- 迷你 Markdown
 def inline(s: str) -> str:
     s = html.escape(s, quote=False)
+    s = re.sub(r"!\[([^\]]*)\]\(([^)\s]+)\)",
+               r'<img src="\2" alt="\1" loading="lazy">', s)
     s = re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
     s = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", s)
     s = re.sub(r"\[([^\]]+)\]\((https?://[^)\s]+)\)",
@@ -346,6 +348,7 @@ REPORT_PAGE = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>拼接与黑块清理技术报告</title>
 <link rel="stylesheet" href="assets/style.css">
+<style>.body img{max-width:100%;height:auto;display:block;margin:14px 0;border-radius:8px}</style>
 </head>
 <body>
 <header class="topbar"><div class="wrap">

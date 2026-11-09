@@ -16,6 +16,7 @@
 |---|---|
 | 完整对话 | https://map9876.github.io/Anime-screenshot-collage/ |
 | 「用户怎么开发的?」 | https://map9876.github.io/Anime-screenshot-collage/devlog.html |
+| 拼接与黑块清理技术报告 | https://map9876.github.io/Anime-screenshot-collage/report.html |
 
 ## 一键生成 GitHub Pages（零配置）
 

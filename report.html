@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>拼接与黑块清理技术报告</title>
 <link rel="stylesheet" href="assets/style.css">
+<style>.body img{max-width:100%;height:auto;display:block;margin:14px 0;border-radius:8px}</style>
 </head>
 <body>
 <header class="topbar"><div class="wrap">
@@ -50,7 +51,29 @@
 <pre><code>python3 -c &quot;import cv2;im=cv2.imread(&#x27;results/亚丝娜镜头1_clean.png&#x27;);print((im.max(axis=2)&lt;8).mean()*100)&quot;
 # 0.0</code></pre>
 <h2>4. 遗留问题（数据本身限制）</h2>
-<ul><li>镜头2 的 bilibili 水印（右上 logo、<code>BV1oT411E7eg 01:14/01:47</code>、<code>01:11/01:47</code>）。背景是有细节的暖光，涂抹痕迹会比水印更明显，故保留。</li><li>镜头1 接缝 1:1 放大仍有极淡重影线——两帧重叠内容在接缝两侧轻微错位（非曝光问题，MSE 曲线无最优位移），整图观看不可见。</li><li>镜头1 左下红色模糊块、斜向蓝色光带是<strong>原画面内容</strong>，不是拼接缺陷。</li></ul></div></div>
+<ul><li>镜头2 的 bilibili 水印（右上 logo、<code>BV1oT411E7eg 01:14/01:47</code>、<code>01:11/01:47</code>）。背景是有细节的暖光，涂抹痕迹会比水印更明显，故保留。</li><li>镜头1 接缝 1:1 放大仍有极淡重影线——两帧重叠内容在接缝两侧轻微错位（非曝光问题，MSE 曲线无最优位移），整图观看不可见。</li><li>镜头1 左下红色模糊块、斜向蓝色光带是<strong>原画面内容</strong>，不是拼接缺陷。</li></ul>
+<h2>5. 后续开发：单命令流水线与逐帧曝光补偿</h2>
+<p>上表是上一版清理脚本的实测记录（数值口径相同、输入画布不同，故不与下表直接对比）。现在把「拼接 → 清理 → 质检」收成一条命令 <code>collage.py</code>（在 <code>main</code> 分支根目录）：</p>
+<pre><code>python3 collage.py 亚丝娜镜头1
+python3 collage.py &quot;frames/*.png&quot; --out result/ --model models/lama_fp32.onnx
+python3 collage.py 亚丝娜镜头1 --skip-stitch
+python3 collage.py --selftest</code></pre>
+<p>没有硬编码绝对路径：模型默认取脚本同目录 <code>models/lama_fp32.onnx</code>，输出默认写输入目录；所有融合模式都写 <code>translate_stitched_raw.png</code>，所以清理阶段可以独立重跑。产物为裁边图、最终清理图、接缝 mask 和 <code>qc_report.json</code>。</p>
+<h3>5.1 曝光补偿从「事后压平」前移到「拼接前对齐」</h3>
+<p>第 2.2 节的斜坡修复是事后补救：台阶已经形成，只能沿下方几百行把色差摊薄。现在在拼接阶段先做逐帧光度对齐：</p>
+<ul><li><code>_pair_photometry()</code> 在两帧重叠的有效像素上估计逐通道 <code>gain/offset</code>：<code>gain</code> 取最小二乘斜率 <code>cov/var</code> 再向 1 收缩 0.85（抵抗重叠区视差造成的过冲），<code>offset</code> 用中位数残差（抗局部内容不一致），并剔除过曝/近黑像素。</li><li><code>exposure_chain()</code> 不再把所有帧都对齐到第一帧，而是按<strong>重叠像素数</strong>建最大生成树，沿最强重叠边把参数传播到 anchor。只有真正重叠的帧之间才估计，避免弱重叠或重复纹理把亮度拉偏。</li><li>补偿作用在融合前的源帧上，接缝两侧自然连续，清理阶段的斜坡只需处理剩余残差。</li></ul>
+<h3>5.2 不靠肉眼：接缝台阶 A/B 自动判据</h3>
+<p><code>seam_cost()</code> 只按有效像素求行均值、并聚焦接缝附近的行，得到一个「最大亮度跳变」标量。<code>photometry=auto</code> 时同一布局跑两遍（关 / 开补偿），开启后至少好 2% 才采用：</p>
+<div class='table-wrap'><table><thead><tr><th>素材</th><th>关闭</th><th>开启</th><th>判定</th></tr></thead><tbody><tr><td>亚丝娜镜头1</td><td>10.00</td><td>5.54</td><td>启用</td></tr><tr><td>亚丝娜镜头2</td><td>2.00</td><td>8.86</td><td><strong>跳过</strong></td></tr><tr><td>龙猫</td><td>5.64</td><td>5.15</td><td>启用</td></tr></tbody></table></div>
+<p>镜头2 说明判据确实必要：它的帧间差异主要来自内容与水印而非曝光，硬套逐帧补偿反而把局部台阶放大 4 倍。<code>--photometry on</code> / <code>off</code> 可强制覆盖。</p>
+<h3>5.3 量化质检与三组实测</h3>
+<p><code>qc_report.json</code> 记录 stitched / raw / clean 三个阶段的尺寸、均值亮度、纯黑占比、最大行/列跳变及其位置，回归时直接 diff。<code>--selftest</code> 用合成三帧不同曝光序列验证补偿链，重叠区 MAE <code>10.29/19.77 → 1.46/3.17</code>。</p>
+<div class='table-wrap'><table><thead><tr><th>素材</th><th>最终尺寸</th><th>纯黑区</th><th>最大行跳变</th><th>最大列跳变</th></tr></thead><tbody><tr><td>亚丝娜镜头1</td><td>1574×3652</td><td>5.223% → 0.000%</td><td>26.55 → 4.84</td><td>70.57 → 2.74</td></tr><tr><td>亚丝娜镜头2</td><td>2134×1649</td><td>5.470% → 0.000%</td><td>94.26 → 2.23</td><td>105.08 → 3.32</td></tr><tr><td>龙猫</td><td>2130×2061</td><td>6.706% → 0.000%</td><td>26.55 → 4.17</td><td>20.10 → 1.32</td></tr></tbody></table></div>
+<p>三组素材黑区全部清零，且第三组 <code>龙猫/</code> 是本次新加入的素材，未做任何参数特调——流水线与 A/B 判据都不依赖特定图。</p>
+<h3>5.4 最新结果图</h3>
+<p><img src="results/亚丝娜镜头1_clean.png" alt="亚丝娜镜头1 清理后" loading="lazy"></p>
+<p><img src="results/亚丝娜镜头2_clean.png" alt="亚丝娜镜头2 清理后" loading="lazy"></p>
+<p><img src="results/龙猫_clean.png" alt="龙猫 清理后" loading="lazy"></p></div></div>
   <footer class="foot">由 <code>src/build_site.py</code> 从 <code>docs/拼接清理报告.md</code> 生成</footer>
 </main>
 </body>
