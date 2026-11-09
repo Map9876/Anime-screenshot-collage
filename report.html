@@ -110,7 +110,23 @@ bash setup_depth.sh --check
   https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_int8.onnx</code></pre>
 <p>不下模型也能跑（跳过 <code>depth</code>，其余 6 种方法照常）：</p>
 <pre><code>/tmp/anime-venv/bin/python method_lab.py 龙猫 --no-depth
-/tmp/anime-venv/bin/python method_lab.py 龙猫 --quick</code></pre></div></div>
+/tmp/anime-venv/bin/python method_lab.py 龙猫 --quick</code></pre>
+<h3>6.6 三版可控出图：脚本、场景与完整生成步骤</h3>
+<p>「刚好没车 / 恰好一辆车 / 四辆车」不是巧合：斜向 pan 让各帧落在画布不同位置，车在帧内也在移动，所以<strong>画布上任一像素最多只有 1 帧看到车，其余帧都是背景</strong>。</p>
+<p>执行脚本 <code>method_lab.py --subject-modes</code>（内部 <code>subject_modes()</code>），完整命令：</p>
+<pre><code>cd /workspace/anime
+uv venv /tmp/anime-venv
+uv pip install --python /tmp/anime-venv/bin/python opencv-python-headless numpy onnxruntime
+/tmp/anime-venv/bin/python method_lab.py 龙猫 --subject-modes</code></pre>
+<p>全自动、无特调、<strong>不需要深度模型</strong>：① SIFT + 纯平移 RANSAC 估计位置，<code>warp_stack()</code> 把 4 帧放到同一画布；② <code>median_full()</code> 跨帧中值得到背景共识，每帧与它差值 &gt;45 的像素标为运动区；③ 排除全部运动区做加权平均 → 0 辆车；④ 只取运动区<strong>最大连通域</strong>（车本体，自动滤掉台标/细线）贴回 → 恰好 1 辆；⑤ 把每帧完整运动区都贴回 → 4 个位置的车。</p>
+<div class='table-wrap'><table><thead><tr><th>输出</th><th>场景</th></tr></thead><tbody><tr><td><code>background_only.png</code></td><td>纯背景重建，检查配准 / 黑边 / 接缝质量</td></tr><tr><td><code>one_subject.png</code></td><td><strong>观赏用最终图</strong>：恰好一辆车</td></tr><tr><td><code>all_subjects.png</code></td><td><strong>研究用</strong>：4 帧车的位置与运动轨迹</td></tr><tr><td><code>subject_masks.png</code></td><td>每帧检测到的车本体掩膜（调试 / 复现）</td></tr><tr><td><code>subject_modes.json</code></td><td>阈值、各帧运动/车本体像素数、贴回帧号</td></tr></tbody></table></div>
+<p><img src="results/method_lab_bg.png" alt="无车：纯背景重建" loading="lazy"></p>
+<p><img src="results/method_lab_one.png" alt="观赏版：恰好一辆车（已去黑边）" loading="lazy"></p>
+<p><img src="results/method_lab_all.png" alt="研究用：4 帧车的运动轨迹" loading="lazy"></p>
+<p>观赏版去黑边，用项目现成的自动化清理流程（LaMa 补未覆盖区，非特调）：</p>
+<pre><code>/tmp/anime-venv/bin/python -c &quot;import clean_stitched as cs; cs.clean(&#x27;龙猫/method_lab/one_subject.png&#x27;, &#x27;龙猫/method_lab/one_subject_clean.png&#x27;, seam=False)&quot;</code></pre>
+<p>→ <code>one_subject_clean.png</code>（2130×2061，黑区清零）；另外两版也可同样清理。</p>
+<p><strong>固定水印没有去除</strong>：左上角「猫屿工坊」台标与左下 bilibili 水印在三版图里都保留。试过两种通用自动化检测（帧内坐标跨帧投票 / 帧间时变低+边缘强），前者因画布边缘覆盖帧数不足只抓到细线，后者把背景纹理大面积误判成 OSD、把画面填花；按「不做特调」原则都已撤回，代码里没有去水印分支，因此也没有去水印的生成步骤。<code>osd_count()</code> 的左上角模板只用于数台标份数打分，<strong>不参与出图</strong>。完整说明见 <code>main</code> 分支 <code>龙猫/method_lab/report.md</code> 第 3.2 节与 README。</p></div></div>
   <footer class="foot">由 <code>src/build_site.py</code> 从 <code>docs/拼接清理报告.md</code> 生成</footer>
 </main>
 </body>
