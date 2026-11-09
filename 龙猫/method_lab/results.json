@@ -985,5 +985,51 @@
     "keep_far",
     "keep_near",
     "keep_near"
-  ]
+  ],
+  "depth_audit": {
+    "model": {
+      "hf_repo": "onnx-community/depth-anything-v2-small",
+      "hf_file": "onnx/model_int8.onnx",
+      "base_model": "depth-anything/Depth-Anything-V2-Small",
+      "license": "Apache-2.0",
+      "bytes": 27258801,
+      "sha256": "01aa7a23de3f4a0ee1a2bb9997e6918104c85a9f95dea46d27b9b3fb0c6b9001"
+    },
+    "regions_depth_mean": {
+      "static_foreground_tree": {
+        "mean": 3.98,
+        "p50": 4.128,
+        "p90": 4.686
+      },
+      "moving_car": {
+        "mean": 2.076,
+        "p50": 2.318,
+        "p90": 2.518
+      },
+      "far_sky": {
+        "mean": 0.463,
+        "p50": 0.467,
+        "p90": 0.733
+      }
+    },
+    "points_removed_by_depth_percentile": {
+      "static_foreground_tree": {
+        "matched_pts": 484,
+        "removed_pts": 418
+      },
+      "moving_car": {
+        "matched_pts": 16,
+        "removed_pts": 9
+      },
+      "far_sky": {
+        "matched_pts": 83,
+        "removed_pts": 0
+      },
+      "all": {
+        "matched_pts": 1623,
+        "removed_pts": 855
+      }
+    },
+    "conclusion": "静态前景树深度均值 3.980 > 运动汽车的 2.076 → 按深度分位剔「近景」会优先剔掉静止的树，而不是运动的车；深度是远近，不是动静。"
+  }
 }

@@ -67,24 +67,72 @@ python3 collage.py --selftest                  # 曝光补偿合成自检，不�
 
 `龙猫/` 是一个斜向上运镜、**画面里有运动的汽车**的镜头，用来回答「pan 镜头里背景移动、主体也移动，是否需要主体识别 / 深度估计」。`method_lab.py` 跑了 **7 种位移估计 / 主体处理 × 5 种融合策略 = 35 组**：
 
+从零到跑通（项目根目录，**完整命令，不简写**）：
+
 ```bash
-python3 method_lab.py 龙猫           # 需要 opencv-python-headless numpy onnxruntime
-python3 method_lab.py 龙猫 --quick   # 只跑 mean / median / seam
-python3 method_lab.py 龙猫 --no-depth
+uv venv /tmp/anime-venv
+uv pip install --python /tmp/anime-venv/bin/python opencv-python-headless numpy onnxruntime
+bash setup_depth.sh --check
+/tmp/anime-venv/bin/python method_lab.py 龙猫
+/tmp/anime-venv/bin/python method_lab.py 龙猫 --depth-audit
 ```
 
-X 轴：`sift`（现有算法）、`orb`、`phase`（相位相关）、`ecc`、`ecc_init`（phase 粗配准 + ECC 精修）、`motionmask`（帧差剔主体）、`depth`（Depth Anything V2 Small int8 ONNX 剔近景）。
+不下模型也能跑（跳过 `depth`，其余 6 种方法）：
+
+```bash
+/tmp/anime-venv/bin/python method_lab.py 龙猫 --no-depth
+/tmp/anime-venv/bin/python method_lab.py 龙猫 --quick
+```
+
+X 轴：`sift`（现有算法）、`orb`、`phase`（相位相关）、`ecc`、`ecc_init`（phase 粗配准 + ECC 精修）、`motionmask`（帧差剔主体）、`depth`（Depth Anything V2 Small int8 ONNX 按深度分位剔匹配点）。
 Y 轴：`mean` / `median`（时序中值）/ `multiband` / `feather` / `seam`。
 
-完整表格见 `龙猫/method_lab/report.md`、`results.json`、`grid.png`、`motion_analysis.png`。
+完整表格见 `龙猫/method_lab/report.md`、`results.json`、`grid.png`、`motion_analysis.png`、`depth_audit.png`。
 
 | 问题 | 结论 |
 |---|---|
-| 现有算法能拼运动主体吗 | **能**。纯平移 RANSAC 自动把汽车当外点剔除，拼接结果无重影；`motionmask` / `depth` 与 baseline 的布局偏差只有 0.69px / 1.83px → **深度估计在这个任务上是多余的** |
+| 现有算法能拼运动主体吗 | **能**。纯平移 RANSAC 自动把汽车当外点剔除，拼接结果无重影；`motionmask` / `depth` 与 baseline 的布局偏差只有 0.69px / 1.83px → 显式主体识别没改变几何结论 |
+| 深度估计能识别运动主体吗 | **不能**，见下节：深度是远近不是动静，静态树比车更近 |
 | 什么最快、能上浏览器 JS | `phase` 单对约 90ms，比 SIFT 快 **22 倍**，位移偏差 0.88px；OpenCV.js 原生支持 `phaseCorrelate` |
 | 哪些方法会失败 | ORB 在动画平坦区收敛到 `(0,0)` 假峰（6 对里 5 对）；纯 ECC 大位移超出收敛域，必须 phase 粗配准 |
 | 融合怎么选 | `seam` 只保留**恰好一辆车**、固定台标 1 份、接缝台阶最低；`median` 更快但把车一并抹掉；`mean` / `feather` 残留 4 份台标 |
 | 真正的问题是什么 | 屏幕固定 OSD 水印跨帧重复，深度估计无效（OSD 没有深度）。「忽略主体」要分清：位移估计时忽略 / 融合时消除重复 / 是否保留一个主体 |
+
+### 深度估计不是解决办法（已定量证伪）
+
+深度给的是**远近**，不是**动静**：静态前景树完全可能比运动的车更靠近镜头，所以「深度估计 → 剔近景 → 忽略运动主体」这条链本身就不成立。`--depth-audit` 用同一份权重实测：
+
+| 区域 | 深度均值 | 匹配点 | 按 70 分位剔「近景」时被剔掉 |
+|---|---|---|---|
+| 静态前景树（不动） | 3.980 | 484 | 418 |
+| 运动汽车（要忽略的） | 2.076 | 16 | 9 |
+| 远景天空 | 0.463 | 83 | 0 |
+
+树比车「近」近一倍；深度掩膜实际剔掉的是**静止的树**（86% 的点），车上 16 个点只剔掉 9 个。这也解释了 `depth` 方法为什么在 `keep_far` / `keep_near` 之间摇摆（6 个 pair 里 3:3）——深度排序与是否运动无关，本来就没有正确方向。识别运动主体要靠**跨帧一致性**（帧差 / 光流 / RANSAC 外点），不是单帧几何。
+
+### 深度模型：完整规格与一键下载
+
+| 项 | 值 |
+|---|---|
+| HuggingFace 仓库 | `onnx-community/depth-anything-v2-small` |
+| 权重文件 | `onnx/model_int8.onnx` |
+| 原模型 | `depth-anything/Depth-Anything-V2-Small`（ViT-S + DPT），Apache-2.0 |
+| 大小 / sha256 | 27,258,801 B（26 MB） / `01aa7a23de3f4a0ee1a2bb9997e6918104c85a9f95dea46d27b9b3fb0c6b9001` |
+| 输入 / 输出 | `pixel_values` float32 `[1,3,518,518]`（RGB，ImageNet mean/std） → `predicted_depth` `[1,518,518]` 相对深度（实测值越大越近） |
+| 推理 | ONNX Runtime 1.31.1 CPU，约 0.5–0.7s/帧；同一份权重可给 transformers.js / ONNX Runtime Web（WebGPU fp16 / WASM） |
+
+一键（下载 + 校验字节数与 sha256，`--check` 额外跑一次 518×518 推理自检）：
+
+```bash
+bash setup_depth.sh --check
+```
+
+等价的完整下载命令：
+
+```bash
+curl -L --fail -o models/depth_anything_v2_small_int8.onnx \
+  https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_int8.onnx
+```
 
 相关论文与项目（FE2E · Jasmine · D4RD · Marigold · Metric3D v2 · BetterDepth · Depth Anything V2 · MiDaS · transformers.js · 3D/MC 工具链）索引见 `龙猫/method_lab/report.md` 第 5 节。第三方仓库本机克隆在 `anime/methods/`，由 `.gitignore` 排除、不随项目提交。
 

@@ -1,9 +1,23 @@
 #!/usr/bin/env python3
 """方法层 XY 对照实验：X = 位移估计 / 主体处理，Y = 融合策略。
 
-    python3 method_lab.py 龙猫
-    python3 method_lab.py 龙猫 --quick             # 只跑 3 种融合
-    python3 method_lab.py 龙猫 --no-depth          # 跳过深度方法（无需 onnx）
+从零跑通（在项目根目录执行，四行完整命令）：
+
+    uv venv /tmp/anime-venv
+    uv pip install --python /tmp/anime-venv/bin/python opencv-python-headless numpy onnxruntime
+    bash setup_depth.sh --check
+    /tmp/anime-venv/bin/python method_lab.py 龙猫
+
+只要矩阵实验、不想下模型：
+
+    /tmp/anime-venv/bin/python method_lab.py 龙猫 --no-depth
+    /tmp/anime-venv/bin/python method_lab.py 龙猫 --quick       # 只跑 3 种融合
+    /tmp/anime-venv/bin/python method_lab.py 龙猫 --depth-audit # 验证「深度≠运动」
+
+模型完整下载命令（等价于一键脚本 setup_depth.sh）：
+
+    curl -L --fail -o models/depth_anything_v2_small_int8.onnx \
+      https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_int8.onnx
 
 X 轴（每对图估计「im_j 相对 im_i 的特征点位移」，再用同一套 MST 布局）：
     sift       现有算法：SIFT + 纯平移 RANSAC（原图/CLAHE 自适应）  ← baseline
@@ -484,6 +498,83 @@ def motion_analysis(ims, pos, stack, masks, offsets, edges, depth, outpath):
             'inliers_in_moving_pct': None if in_ratio is None else round(in_ratio, 2)}
 
 
+# ------------------------------------------------------------------ 深度审计
+def depth_audit(ims, de, outdir):
+    """回答「深度估计能不能识别运动主体」。
+
+    深度给的是**远近**，不是**动静**：静态前景树完全可能比运动的车更近。
+    这里量化两件事：
+      1) 静态前景树 / 运动汽车 / 远景天空 各自的深度分布；
+      2) 按深度分位剔点时，被剔掉的匹配点究竟落在谁身上。
+    """
+    d1 = de(ims[0], 0)
+    d2 = de(ims[1], 1) if len(ims) > 1 else d1
+    h, w = d1.shape
+    # 比例坐标，对 2130x1156 的裁边帧：左侧前景树 / 中上部汽车 / 右上远景天空
+    R = {
+        'static_foreground_tree': (int(h * .13), int(h * .52), int(w * .05), int(w * .33)),
+        'moving_car': (int(h * .19), int(h * .48), int(w * .385), int(w * .525)),
+        'far_sky': (int(h * .01), int(h * .19), int(w * .66), int(w * .96)),
+    }
+    regions = {}
+    for name, (y0, y1, x0, x1) in R.items():
+        v = d1[y0:y1, x0:x1]
+        regions[name] = {'mean': round(float(v.mean()), 3),
+                         'p50': round(float(np.percentile(v, 50)), 3),
+                         'p90': round(float(np.percentile(v, 90)), 3)}
+
+    removed = {}
+    if len(ims) > 1:
+        g1 = cv2.cvtColor(ims[0], cv2.COLOR_BGR2GRAY)
+        g2 = cv2.cvtColor(ims[1], cv2.COLOR_BGR2GRAY)
+        pts = feature_pts(g1, g2, 'sift')
+        if pts is not None:
+            src, dst = pts
+            v1 = d1[np.clip(src[:, 1].astype(int), 0, h - 1),
+                    np.clip(src[:, 0].astype(int), 0, w - 1)]
+            v2 = d2[np.clip(dst[:, 1].astype(int), 0, h - 1),
+                    np.clip(dst[:, 0].astype(int), 0, w - 1)]
+            q1, q2 = np.percentile(d1, 70), np.percentile(d2, 70)
+            cut = (v1 > q1) | (v2 > q2)      # 「剔近景」方向：剔除深度值最大的 30%
+            for name, (y0, y1, x0, x1) in R.items():
+                inside = ((src[:, 1] >= y0) & (src[:, 1] < y1) &
+                          (src[:, 0] >= x0) & (src[:, 0] < x1))
+                removed[name] = {'matched_pts': int(inside.sum()),
+                                 'removed_pts': int((inside & cut).sum())}
+            removed['all'] = {'matched_pts': int(len(src)),
+                              'removed_pts': int(cut.sum())}
+
+    vis = cv2.applyColorMap(cv2.normalize(d1, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8),
+                            cv2.COLORMAP_MAGMA)
+    colors = {'static_foreground_tree': (0, 255, 255),
+              'moving_car': (0, 0, 255), 'far_sky': (255, 255, 0)}
+    for name, (y0, y1, x0, x1) in R.items():
+        cv2.rectangle(vis, (x0, y0), (x1, y1), colors[name], 2)
+        cv2.putText(vis, name, (x0 + 4, y0 + 18),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, colors[name], 1)
+    cv2.imwrite(str(outdir / 'depth_audit.png'), vis)
+
+    tree, car = regions['static_foreground_tree']['mean'], regions['moving_car']['mean']
+    res = {
+        'model': {
+            'hf_repo': 'onnx-community/depth-anything-v2-small',
+            'hf_file': 'onnx/model_int8.onnx',
+            'base_model': 'depth-anything/Depth-Anything-V2-Small',
+            'license': 'Apache-2.0', 'bytes': 27258801,
+            'sha256': '01aa7a23de3f4a0ee1a2bb9997e6918104c85a9f95dea46d27b9b3fb0c6b9001',
+        },
+        'regions_depth_mean': regions,
+        'points_removed_by_depth_percentile': removed,
+        'conclusion': ('静态前景树深度均值 %.3f %s 运动汽车的 %.3f → '
+                       '按深度分位剔「近景」会优先剔掉静止的树，而不是运动的车；'
+                       '深度是远近，不是动静。' %
+                       (tree, '>' if tree > car else '<', car)),
+    }
+    (outdir / 'depth_audit.json').write_text(
+        json.dumps(res, ensure_ascii=False, indent=2), encoding='utf-8')
+    return res
+
+
 # ------------------------------------------------------------------ 报告
 def write_report(path, ctx):
     rows = ctx['rows']
@@ -542,7 +633,7 @@ def write_report(path, ctx):
                   r['osd_count'], r['row_jump'], r['col_jump'], r['seam_cost'],
                   r['black_pct'], r['t_fuse_ms']))
     L.append('')
-    L.append('## 3. 运动主体 / 深度估计是否必要')
+    L.append('## 3. 运动主体 / 为什么深度估计不是解决办法')
     L.append('')
     ma = ctx['motion']
     L.append('- 第 1 帧被判为「运动/非背景」的面积占比：**%.2f%%**；'
@@ -555,10 +646,40 @@ def write_report(path, ctx):
              '（`motion_analysis.png`：红色是车，绿点是内点）。' % ma['moving_pct'])
     dev = ['`%s` %.2fpx' % (k, ctx['layouts'][k]['max_dev'])
            for k in ('motionmask', 'depth') if k in ctx['layouts']]
-    L.append('- `motionmask`（帧差剔主体）与 `depth`（Depth Anything V2 Small int8 剔近景）'
+    L.append('- `motionmask`（帧差剔主体）与 `depth`（按深度分位剔匹配点）'
              '相对 baseline 的最大布局偏差：%s → '
-             '**显式主体识别没有改变几何结论，深度模型在这个任务上是多余的**。' %
+             '**显式主体识别没有改变几何结论**。' %
              ('、'.join(dev) if dev else 'n/a'))
+    L.append('')
+    L.append('### 3.1 深度给的是「远近」，不是「动静」')
+    L.append('')
+    L.append('最容易被误解的一点：**静态前景树完全可能比运动的车更靠近镜头**，'
+             '所以「深度估计 → 剔近景 → 忽略运动主体」这条链本身就不成立。'
+             '`--depth-audit` 用同一份权重做了定量验证（`depth_audit.json` / `depth_audit.png`）：')
+    L.append('')
+    L.append('| 区域 | 深度均值 | 匹配点 | 按 70 分位剔「近景」时被剔掉 |')
+    L.append('|---|---|---|---|')
+    da = ctx.get('depth_audit')
+    if da:
+        labels = [('static_foreground_tree', '静态前景树（不动）'),
+                  ('moving_car', '运动汽车（要忽略的）'), ('far_sky', '远景天空')]
+        for key, label in labels:
+            m = da['regions_depth_mean'][key]['mean']
+            rm = da['points_removed_by_depth_percentile'].get(key, {})
+            L.append('| %s | %.3f | %d | %d |' %
+                     (label, m, rm.get('matched_pts', 0), rm.get('removed_pts', 0)))
+        L.append('')
+        L.append('**静态前景树 3.980 > 运动汽车 2.076**：树比车「近」近一倍。'
+                 '树上 484 个匹配点被剔掉 418 个（86%），车上 16 个点只剔掉 9 个，'
+                 '远景 0 个 → **深度掩膜实际在剔静止的树，几乎没碰运动主体**。')
+        L.append('')
+        L.append('这也解释了 `depth` 方法的方向自适应为什么在 `keep_far` / `keep_near` '
+                 '之间摇摆（6 个 pair 里 3:3）：深度排序与「是否在运动」无关，'
+                 '本来就不存在一个正确方向。识别运动主体要靠**跨帧一致性**'
+                 '（帧差 / 光流 / RANSAC 外点），而不是单帧几何。')
+        L.append('')
+        L.append('![深度≠运动：静态树比车更近](depth_audit.png)')
+    L.append('')
     L.append('- 融合阶段运动主体有三种命运：`mean` / `multiband` / `feather` 把 4 个位置的车'
              '平均成淡影，`median` 直接把车抹掉（背景最干净），`seam` 只保留**恰好一辆车**。'
              '见 `grid.png` 最后一列。')
@@ -584,14 +705,57 @@ def write_report(path, ctx):
              '**不必跑深度模型**；SIFT / ORB / ECC 都不是必需的。' %
              (t_phase, t_sift / max(t_phase, 1)))
     L.append('')
-    L.append('若确实要做主体级 3D / 景深效果，再上 '
-             '`onnx-community/depth-anything-v2-small` 的 int8 ONNX（26 MB，CPU ~0.7s/帧，'
-             'WebGPU 更快），用 transformers.js 的 `depth-estimation` pipeline 或 '
-             'ONNX Runtime Web 加载同一份权重。注意本实验里它只用于「剔近景匹配点」，'
-             '而这件事 RANSAC 已经免费做完了。')
+    L.append('若确实要做主体级 3D / 景深效果，再上下面的 int8 ONNX；'
+             '但注意在本实验里它只用于「按深度分位剔匹配点」，而这件事 RANSAC 免费做完了、'
+             '且深度掩膜剔错了对象（见 3.1）。')
     L.append('')
     L.append('> 本实验只到「融合」为止，故 `黑区%` 仍是原始画布的未覆盖区域；'
              '真实出图再走 `collage.py` 的 LaMa 清理阶段（实测可清到 0.000%）。')
+    L.append('')
+    L.append('### 4.1 深度模型：完整规格与一键复现')
+    L.append('')
+    L.append('| 项 | 值 |')
+    L.append('|---|---|')
+    specs = [
+        ('HuggingFace 仓库', '`onnx-community/depth-anything-v2-small`'),
+        ('权重文件', '`onnx/model_int8.onnx`'),
+        ('原模型', '`depth-anything/Depth-Anything-V2-Small`（ViT-S 编码器 + DPT 头），Apache-2.0'),
+        ('大小 / sha256', '27,258,801 B（26 MB） / `01aa7a23de3f4a0ee1a2bb9997e6918104c85a9f95dea46d27b9b3fb0c6b9001`'),
+        ('输入', '`pixel_values` float32 `[1,3,518,518]`，RGB，减 ImageNet mean / 除 std，bicubic resize 到 518×518'),
+        ('输出', '`predicted_depth` `[1,518,518]` 相对深度；实测值越大越近（树 3.98 > 车 2.08 > 天空 0.46）'),
+        ('推理', 'ONNX Runtime 1.31.1 CPUExecutionProvider，约 0.5–0.7s/帧（2130×1156 输入缩到 518×518）'),
+        ('浏览器', '同一份权重交给 transformers.js 的 `depth-estimation` pipeline 或 ONNX Runtime Web（WebGPU fp16 / WASM 回退）'),
+        ('下载 URL', '`https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_int8.onnx`'),
+    ]
+    for k, v in specs:
+        L.append('| %s | %s |' % (k, v))
+    L.append('')
+    L.append('**从零到跑通**（项目根目录，完整命令，不简写）：')
+    L.append('')
+    L.append('```bash')
+    L.append('uv venv /tmp/anime-venv')
+    L.append('uv pip install --python /tmp/anime-venv/bin/python opencv-python-headless numpy onnxruntime')
+    L.append('bash setup_depth.sh --check')
+    L.append('/tmp/anime-venv/bin/python method_lab.py 龙猫')
+    L.append('/tmp/anime-venv/bin/python method_lab.py 龙猫 --depth-audit')
+    L.append('```')
+    L.append('')
+    L.append('只下模型（等价于 `setup_depth.sh` 的下载部分）：')
+    L.append('')
+    L.append('```bash')
+    L.append('curl -L --fail -o models/depth_anything_v2_small_int8.onnx \\')
+    L.append('  https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_int8.onnx')
+    L.append('```')
+    L.append('')
+    L.append('不下模型也能跑 6 种方法的矩阵：')
+    L.append('')
+    L.append('```bash')
+    L.append('/tmp/anime-venv/bin/python method_lab.py 龙猫 --no-depth')
+    L.append('/tmp/anime-venv/bin/python method_lab.py 龙猫 --quick          # 只跑 3 种融合')
+    L.append('```')
+    L.append('')
+    L.append('`setup_depth.sh` 会校验字节数与 sha256；`--check` 额外用 ONNX Runtime '
+             '跑一次 518×518 随机输入，打印输入输出规格。`--model PATH` 可换其它 ONNX 权重。')
     L.append('')
     L.append('## 5. 相关论文 / 项目索引')
     L.append('')
@@ -659,6 +823,8 @@ def main():
     ap.add_argument('--model', default=str(HERE / 'models' / 'depth_anything_v2_small_int8.onnx'))
     ap.add_argument('--quick', action='store_true', help='只跑 mean / median / seam')
     ap.add_argument('--no-depth', action='store_true', help='跳过深度方法')
+    ap.add_argument('--depth-audit', action='store_true',
+                    help='只做「深度≠运动」定量审计，不跑 35 组矩阵')
     a = ap.parse_args()
 
     p = Path(a.src)
@@ -673,13 +839,29 @@ def main():
     n = len(ims)
     print(f'输入 {n} 张，裁边后 {ims[0].shape[1]}x{ims[0].shape[0]}；输出 {outdir}', flush=True)
 
+    DOWNLOAD_HINT = (
+        '缺少深度模型 %s\n完整下载命令（项目根目录执行）：\n'
+        '  curl -L --fail -o models/depth_anything_v2_small_int8.onnx \\\n'
+        '    https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_int8.onnx\n'
+        '或一键： bash setup_depth.sh --check\n'
+        '不想用模型：加 --no-depth' % a.model)
+
+    if a.depth_audit:
+        if not Path(a.model).exists():
+            ap.error(DOWNLOAD_HINT)
+        res = depth_audit(ims, DepthEstimator(a.model), outdir)
+        print(json.dumps(res, ensure_ascii=False, indent=2), flush=True)
+        print('产物:', outdir / 'depth_audit.json', outdir / 'depth_audit.png', flush=True)
+        return 0
+
     xnames = [x for x in ESTIMATORS if not (a.no_depth and x == 'depth')]
     ynames = ['mean', 'median', 'seam'] if a.quick else FUSIONS
 
     ctx = {}
     if 'depth' in xnames:
         if not Path(a.model).exists():
-            print(f'缺少深度模型 {a.model}，跳过 depth', flush=True)
+            print(DOWNLOAD_HINT, flush=True)
+            print('自动跳过 depth 方法，其余 6 种方法照常运行。', flush=True)
             xnames.remove('depth')
         else:
             ctx['depth'] = DepthEstimator(a.model)
@@ -801,11 +983,14 @@ def main():
         'speed': speed, 'best': best,
         'depth_choices': ctx.get('depth_choices', []),
     }
+    audit_fp = outdir / 'depth_audit.json'
+    if audit_fp.exists():
+        result['depth_audit'] = json.loads(audit_fp.read_text(encoding='utf-8'))
     (outdir / 'results.json').write_text(
         json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
     write_report(outdir / 'report.md', {**result,
                  'xnames': [x for x in xnames if x in all_ests]})
-    print('\n最优:', best['x'], best['y'] if best else None, flush=True)
+    print('\n最优:', (best['x'], best['y']) if best else None, flush=True)
     print('运动主体:', motion, flush=True)
     print('产物:', outdir, flush=True)
     return 0

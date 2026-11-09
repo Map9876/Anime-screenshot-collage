@@ -66,11 +66,28 @@
 | `depth` | `feather` | 2403x2068 | 5.67 | 6.24 | 4 | 29.33 | 21.66 | 36.37 | 6.697 | 88 |
 | `depth` | `seam` | 2404x2069 | 5.67 | 6.24 | 1 | 31.55 | 33.24 | 3.05 | 6.798 | 3186 |
 
-## 3. 运动主体 / 深度估计是否必要
+## 3. 运动主体 / 为什么深度估计不是解决办法
 
 - 第 1 帧被判为「运动/非背景」的面积占比：**3.96%**；SIFT RANSAC 内点落在该区域的比例：**7.97%**。
 - 运动 / 非背景区域只占有效画面约 **4.0%**，而纯平移 RANSAC 的强峰有 1000+ 内点，显然来自背景；落在大差异区的内点主要是固定 OSD 与曝光差异，不是车本体。**汽车被自动当外点剔除，拼接结果无重影**（`motion_analysis.png`：红色是车，绿点是内点）。
-- `motionmask`（帧差剔主体）与 `depth`（Depth Anything V2 Small int8 剔近景）相对 baseline 的最大布局偏差：`motionmask` 0.69px、`depth` 1.83px → **显式主体识别没有改变几何结论，深度模型在这个任务上是多余的**。
+- `motionmask`（帧差剔主体）与 `depth`（按深度分位剔匹配点）相对 baseline 的最大布局偏差：`motionmask` 0.69px、`depth` 1.83px → **显式主体识别没有改变几何结论**。
+
+### 3.1 深度给的是「远近」，不是「动静」
+
+最容易被误解的一点：**静态前景树完全可能比运动的车更靠近镜头**，所以「深度估计 → 剔近景 → 忽略运动主体」这条链本身就不成立。`--depth-audit` 用同一份权重做了定量验证（`depth_audit.json` / `depth_audit.png`）：
+
+| 区域 | 深度均值 | 匹配点 | 按 70 分位剔「近景」时被剔掉 |
+|---|---|---|---|
+| 静态前景树（不动） | 3.980 | 484 | 418 |
+| 运动汽车（要忽略的） | 2.076 | 16 | 9 |
+| 远景天空 | 0.463 | 83 | 0 |
+
+**静态前景树 3.980 > 运动汽车 2.076**：树比车「近」近一倍。树上 484 个匹配点被剔掉 418 个（86%），车上 16 个点只剔掉 9 个，远景 0 个 → **深度掩膜实际在剔静止的树，几乎没碰运动主体**。
+
+这也解释了 `depth` 方法的方向自适应为什么在 `keep_far` / `keep_near` 之间摇摆（6 个 pair 里 3:3）：深度排序与「是否在运动」无关，本来就不存在一个正确方向。识别运动主体要靠**跨帧一致性**（帧差 / 光流 / RANSAC 外点），而不是单帧几何。
+
+![深度≠运动：静态树比车更近](depth_audit.png)
+
 - 融合阶段运动主体有三种命运：`mean` / `multiband` / `feather` 把 4 个位置的车平均成淡影，`median` 直接把车抹掉（背景最干净），`seam` 只保留**恰好一辆车**。见 `grid.png` 最后一列。
 - 固定 OSD 同理（台标在每帧屏幕坐标不动，拼接后按各帧位置重复）：`mean` / `multiband` / `feather` 残留 4 份，`median` 2 份，`seam` 1 份。深度估计对此无效——OSD 没有深度。
 - 所以「忽略主体」要分清三层：① **估计位移时**忽略（纯平移 RANSAC 已做到）；② **融合时**消除重复主体（`median` / `seam`）；③ 保留一个主体（只有 `seam`）。
@@ -90,9 +107,49 @@
 
 **结论（面向浏览器 JS）**：`phase` 单对约 90ms，比 SIFT 快约 22 倍、位移偏差 <1px，OpenCV.js 原生就有 `phaseCorrelate`。配合 `seam`（保留一辆车、台标 1 份）或 `median`（更快、背景最干净）即可，**不必跑深度模型**；SIFT / ORB / ECC 都不是必需的。
 
-若确实要做主体级 3D / 景深效果，再上 `onnx-community/depth-anything-v2-small` 的 int8 ONNX（26 MB，CPU ~0.7s/帧，WebGPU 更快），用 transformers.js 的 `depth-estimation` pipeline 或 ONNX Runtime Web 加载同一份权重。注意本实验里它只用于「剔近景匹配点」，而这件事 RANSAC 已经免费做完了。
+若确实要做主体级 3D / 景深效果，再上下面的 int8 ONNX；但注意在本实验里它只用于「按深度分位剔匹配点」，而这件事 RANSAC 免费做完了、且深度掩膜剔错了对象（见 3.1）。
 
 > 本实验只到「融合」为止，故 `黑区%` 仍是原始画布的未覆盖区域；真实出图再走 `collage.py` 的 LaMa 清理阶段（实测可清到 0.000%）。
+
+### 4.1 深度模型：完整规格与一键复现
+
+| 项 | 值 |
+|---|---|
+| HuggingFace 仓库 | `onnx-community/depth-anything-v2-small` |
+| 权重文件 | `onnx/model_int8.onnx` |
+| 原模型 | `depth-anything/Depth-Anything-V2-Small`（ViT-S 编码器 + DPT 头），Apache-2.0 |
+| 大小 / sha256 | 27,258,801 B（26 MB） / `01aa7a23de3f4a0ee1a2bb9997e6918104c85a9f95dea46d27b9b3fb0c6b9001` |
+| 输入 | `pixel_values` float32 `[1,3,518,518]`，RGB，减 ImageNet mean / 除 std，bicubic resize 到 518×518 |
+| 输出 | `predicted_depth` `[1,518,518]` 相对深度；实测值越大越近（树 3.98 > 车 2.08 > 天空 0.46） |
+| 推理 | ONNX Runtime 1.31.1 CPUExecutionProvider，约 0.5–0.7s/帧（2130×1156 输入缩到 518×518） |
+| 浏览器 | 同一份权重交给 transformers.js 的 `depth-estimation` pipeline 或 ONNX Runtime Web（WebGPU fp16 / WASM 回退） |
+| 下载 URL | `https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_int8.onnx` |
+
+**从零到跑通**（项目根目录，完整命令，不简写）：
+
+```bash
+uv venv /tmp/anime-venv
+uv pip install --python /tmp/anime-venv/bin/python opencv-python-headless numpy onnxruntime
+bash setup_depth.sh --check
+/tmp/anime-venv/bin/python method_lab.py 龙猫
+/tmp/anime-venv/bin/python method_lab.py 龙猫 --depth-audit
+```
+
+只下模型（等价于 `setup_depth.sh` 的下载部分）：
+
+```bash
+curl -L --fail -o models/depth_anything_v2_small_int8.onnx \
+  https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_int8.onnx
+```
+
+不下模型也能跑 6 种方法的矩阵：
+
+```bash
+/tmp/anime-venv/bin/python method_lab.py 龙猫 --no-depth
+/tmp/anime-venv/bin/python method_lab.py 龙猫 --quick          # 只跑 3 种融合
+```
+
+`setup_depth.sh` 会校验字节数与 sha256；`--check` 额外用 ONNX Runtime 跑一次 518×518 随机输入，打印输入输出规格。`--model PATH` 可换其它 ONNX 权重。
 
 ## 5. 相关论文 / 项目索引
 
