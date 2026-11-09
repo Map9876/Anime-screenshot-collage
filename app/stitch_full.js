@@ -30,10 +30,10 @@
   }
 
   // ---------- 局部特征：下采样灰度 → 梯度 → 关键点 → 4×4×4 方向直方图 ----------
-  function buildFeatures(im, enhanced) {
+  function buildFeatures(im, enhanced, scale) {
     const iw = im.w, ih = im.h, src = im.data;
-    const w = Math.max(64, Math.round(Math.min(1, FW / iw) * iw));
-    const h = Math.max(64, Math.round(ih * w / iw));
+    const w = Math.max(64, Math.round(iw * scale));
+    const h = Math.max(64, Math.round(ih * scale));
     const acc = new Float64Array(w * h), cnt = new Uint32Array(w * h);
     for (let y = 0; y < ih; y++) {
       const ty = Math.min(h - 1, (y * h / ih) | 0), row = ty * w;
@@ -116,7 +116,7 @@
       n2 = Math.sqrt(n2) + 1e-9;
       for (let j = 0; j < D; j++) desc[off + j] /= n2;
     }
-    return { w, h, kp, desc, sx: iw / w, sy: ih / h };
+    return { w, h, kp, desc, sx: 1 / scale, sy: 1 / scale };
   }
 
   // ---------- 描述子最近邻 + ratio test + 纯平移 RANSAC ----------
@@ -167,6 +167,39 @@
     const sx = (a.feat[0].sx + b.feat[0].sx) / 2;
     const sy = (a.feat[0].sy + b.feat[0].sy) / 2;
     return { dx: r.dx * sx, dy: r.dy * sy, ninl: r.ninl, ngood: r.ngood };
+  }
+
+  // ---------- 位移细化：在特征估计附近 ±3px 用重叠区梯度差对齐到像素级 ----------
+  function overlapDiff(A, B, dx, dy) {
+    const ix = Math.round(dx), iy = Math.round(dy);
+    const x0 = Math.max(0, ix), y0 = Math.max(0, iy);
+    const x1 = Math.min(A.w, B.w + ix), y1 = Math.min(A.h, B.h + iy);
+    if (x1 - x0 < 60 || y1 - y0 < 30) return 1e9;
+    const ga = A.data, gb = B.data;
+    const gray = (d, p) => 0.299 * d[p] + 0.587 * d[p + 1] + 0.114 * d[p + 2];
+    let s = 0, n = 0;
+    for (let y = y0 + 1; y < y1 - 1; y += 3) {
+      let pa = 0, pb = 0;
+      for (let x = x0 + 1; x < x1 - 1; x += 3) {
+        const a = (y * A.w + x) * 4, b = ((y - iy) * B.w + x - ix) * 4;
+        const va = gray(ga, a), vb = gray(gb, b);
+        if (x > x0 + 1) s += Math.abs((va - pa) - (vb - pb));
+        pa = va; pb = vb; n++;
+      }
+    }
+    return n ? s / n : 1e9;
+  }
+
+  function refineShift(A, B, dx, dy, lockX, lockY) {
+    let best = { dx, dy, s: overlapDiff(A, B, dx, dy) };
+    for (let oy = lockY ? 0 : -3; oy <= (lockY ? 0 : 3); oy++) {
+      for (let ox = lockX ? 0 : -3; ox <= (lockX ? 0 : 3); ox++) {
+        if (!ox && !oy) continue;
+        const s = overlapDiff(A, B, dx + ox, dy + oy);
+        if (s < best.s - 0.05 && s < best.s * 0.985) best = { dx: dx + ox, dy: dy + oy, s };
+      }
+    }
+    return best;
   }
 
   // ---------- 单帧暗边修剪（Python trim_dark_edges：按近黑占比而非整行均值） ----------
@@ -471,7 +504,65 @@
     return { w: W, h: H, data, valid };
   }
 
-  // ---------- 外接矩形 + 水平/垂直插值补洞 + 裁暗边 ----------
+  // ---------- 接缝光度台阶柔化（对应 clean_stitched.py 的 seam_fix / soften_seam） ----------
+  // 只调整每行的低频亮度/颜色，不动像素细节与几何，把帧间光影差摊到 ±10 行
+  function softenSeamSteps(data, W, H) {
+    const mean = new Float64Array(H * 3), cnt = new Float64Array(H);
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const p = (y * W + x) * 4;
+        const r = data[p], g = data[p + 1], b = data[p + 2];
+        if (r < 8 && g < 8 && b < 8) continue;
+        mean[y * 3] += r; mean[y * 3 + 1] += g; mean[y * 3 + 2] += b; cnt[y]++;
+      }
+    }
+    for (let y = 0; y < H; y++) {
+      if (cnt[y] < W * 0.3) { cnt[y] = 0; continue; }
+      for (let c = 0; c < 3; c++) mean[y * 3 + c] /= cnt[y];
+    }
+    const diff = new Float64Array(H);
+    let maxd = 0;
+    for (let y = 1; y < H - 1; y++) {
+      if (!cnt[y] || !cnt[y + 1]) continue;
+      diff[y] = 0;
+      for (let c = 0; c < 3; c++) diff[y] += Math.abs(mean[y * 3 + c] - mean[(y + 1) * 3 + c]);
+      diff[y] /= 3;
+      if (diff[y] > maxd) maxd = diff[y];
+    }
+    if (maxd < 2) return;
+    const thr = Math.max(2.5, maxd * 0.55), R = 10;
+    const used = new Uint8Array(H);
+    for (let y0 = R + 1; y0 < H - R - 1; y0++) {
+      if (diff[y0] < thr || used[y0]) continue;
+      const sm = new Float64Array(3 * (2 * R + 1));
+      for (let d = -R; d <= R; d++) {
+        let ws = 0;
+        for (let e = -R; e <= R; e++) {
+          const y = y0 + d + e;
+          if (y < 0 || y >= H || !cnt[y]) continue;
+          const w = Math.exp(-(e * e) / 18);
+          for (let c = 0; c < 3; c++) sm[(d + R) * 3 + c] += mean[y * 3 + c] * w;
+          ws += w;
+        }
+        if (ws) for (let c = 0; c < 3; c++) sm[(d + R) * 3 + c] /= ws;
+      }
+      for (let d = -R; d <= R; d++) {
+        const y = y0 + d;
+        if (!cnt[y]) continue;
+        const w = Math.exp(-(d * d) / 32) * 0.85;
+        const delta = [0, 0, 0];
+        for (let c = 0; c < 3; c++) delta[c] = (sm[(d + R) * 3 + c] - mean[y * 3 + c]) * w;
+        for (let x = 0; x < W; x++) {
+          const p = (y * W + x) * 4;
+          if (data[p] < 8 && data[p + 1] < 8 && data[p + 2] < 8) continue;
+          for (let c = 0; c < 3; c++) data[p + c] = clamp(data[p + c] + delta[c], 0, 255);
+        }
+        used[y] = 1;
+      }
+    }
+  }
+
+  // ---------- 只裁到有效像素外接矩形；未覆盖区留黑，保留楼梯锯齿边缘 ----------
   function finish2(fused) {
     const { w: W, h: H, data, valid } = fused;
     let x0 = W, x1 = -1, y0 = H, y1 = -1;
@@ -497,81 +588,8 @@
       }
     }
     const holePct = holes * 100 / (nw * nh);
-    // 水平插值 + 两端镜像外推：斜向运镜留下的阶梯黑块全部填满
-    for (let y = 0; y < nh; y++) {
-      const row = y * nw;
-      let first = -1, last = -1;
-      for (let x = 0; x < nw; x++) if (mask[row + x]) { if (first < 0) first = x; last = x; }
-      if (first < 0) continue;
-      for (let x = first; x <= last; x++) {
-        if (mask[row + x]) continue;
-        let l = x, r = x;
-        while (l >= 0 && !mask[row + l]) l--;
-        while (r < nw && !mask[row + r]) r++;
-        if (l < 0 || r >= nw) continue;
-        const t = (x - l) / (r - l), a = (row + l) * 4, b = (row + r) * 4, d = (row + x) * 4;
-        for (let c = 0; c < 3; c++) out[d + c] = out[a + c] * (1 - t) + out[b + c] * t;
-      }
-      for (let x = 0; x < first; x++) {
-        const a = (row + clamp(2 * first - x, first, last)) * 4, d = (row + x) * 4;
-        for (let c = 0; c < 3; c++) out[d + c] = out[a + c];
-      }
-      for (let x = last + 1; x < nw; x++) {
-        const a = (row + clamp(2 * last - x, first, last)) * 4, d = (row + x) * 4;
-        for (let c = 0; c < 3; c++) out[d + c] = out[a + c];
-      }
-      for (let x = 0; x < nw; x++) mask[row + x] = 1;
-    }
-    // 整行都无效时复制最近的有效行
-    for (let y = 0; y < nh; y++) {
-      const row = y * nw;
-      if (mask[row]) continue;
-      let sy = -1;
-      for (let d = 1; d < nh && sy < 0; d++) {
-        if (y - d >= 0 && mask[(y - d) * nw]) sy = y - d;
-        else if (y + d < nh && mask[(y + d) * nw]) sy = y + d;
-      }
-      if (sy >= 0) {
-        out.set(out.subarray(sy * nw * 4, (sy + 1) * nw * 4), row * nw * 4);
-        for (let x = 0; x < nw; x++) mask[row + x] = 1;
-      }
-    }
-    // 四周 1~2px 暗边
-    let cx0 = 0, cy0 = 0, cw = nw, ch = nh;
-    for (let k = 0; k < 8; k++) {
-      const darkRow = y => {
-        let c = 0;
-        for (let x = cx0; x < cx0 + cw; x++) {
-          const p = (y * nw + x) * 4;
-          if (out[p] < 20 && out[p + 1] < 20 && out[p + 2] < 20) c++;
-        }
-        return c / cw > 0.35;
-      };
-      const darkCol = x => {
-        let c = 0;
-        for (let y = cy0; y < cy0 + ch; y++) {
-          const p = (y * nw + x) * 4;
-          if (out[p] < 20 && out[p + 1] < 20 && out[p + 2] < 20) c++;
-        }
-        return c / ch > 0.35;
-      };
-      let hit = false;
-      if (ch > 8 && darkRow(cy0)) { cy0++; ch--; hit = true; }
-      if (ch > 8 && darkRow(cy0 + ch - 1)) { ch--; hit = true; }
-      if (cw > 8 && darkCol(cx0)) { cx0++; cw--; hit = true; }
-      if (cw > 8 && darkCol(cx0 + cw - 1)) { cw--; hit = true; }
-      if (!hit) break;
-    }
-    let fw = nw, fh = nh, fdata = out;
-    if (cw !== nw || ch !== nh) {
-      const cropped = new Uint8ClampedArray(cw * ch * 4);
-      for (let y = 0; y < ch; y++) {
-        cropped.set(out.subarray(((y + cy0) * nw + cx0) * 4, ((y + cy0) * nw + cx0 + cw) * 4), y * cw * 4);
-      }
-      fw = cw; fh = ch; fdata = cropped;
-    }
-    fixEdgeBlack(fdata, fw, fh);
-    return { w: fw, h: fh, data: fdata, diag: { holePct: +holePct.toFixed(2) } };
+    // 不补洞、不裁边：未覆盖区保留黑色，边缘自然呈楼梯锯齿状，画面内容零扭曲
+    return { w: nw, h: nh, data: out, diag: { holePct: +holePct.toFixed(2) } };
   }
 
   // ---------- 主流程 ----------
@@ -580,8 +598,11 @@
     const t0 = (typeof performance !== 'undefined' ? performance : Date).now();
     const cropped = images.map(im => trimFrameEdges(base.cropBlackBorder(im)));
     const n = cropped.length;
+    // 各帧宽度可能不同（letterbox 裁剪量不同），必须共用同一缩放比，
+    // 否则 A/B 关键点的像素单位不一致，换算回原图会产生几像素的系统性错位。
+    const featScale = Math.min(1, FW / Math.max(...cropped.map(im => im.w)));
     const frames = cropped.map(im => ({
-      im, feat: [buildFeatures(im, false), buildFeatures(im, true)], fft: null
+      im, feat: [buildFeatures(im, false, featScale), buildFeatures(im, true, featScale)], fft: null
     }));
     for (let i = 0; i < n; i++) {
       frames[i].fft = base.prepare(cropped[i]);
@@ -595,7 +616,12 @@
         const ph = base.phaseShift(frames[i].fft, frames[j].fft);
         let dx, dy, ninl, src;
         if (f) {
-          dx = f.dx; dy = f.dy; ninl = f.ninl; src = 'feat';
+          // 纯垂直 / 纯水平摇镜：副轴直接归零并锁定，避免特征噪声与细化把画面横向拉偏
+          const lockX = Math.abs(f.dx) < 10 && Math.abs(f.dy) > 40;
+          const lockY = Math.abs(f.dy) < 10 && Math.abs(f.dx) > 40;
+          const fx = lockX ? 0 : f.dx, fy = lockY ? 0 : f.dy;
+          const r = refineShift(frames[i].im, frames[j].im, fx, fy, lockX, lockY);
+          dx = r.dx; dy = r.dy; ninl = f.ninl; src = 'feat';
         } else {
           dx = ph.dx; dy = ph.dy; ninl = Math.max(1, Math.round(ph.resp / 10)); src = 'phase';
         }
@@ -646,6 +672,7 @@
     } else {
       fused = await seamFuse(imgs, pos2, expo, opts.onProgress);
     }
+    softenSeamSteps(fused.data, fused.w, fused.h);
     const result = finish2(fused);
     const t1 = (typeof performance !== 'undefined' ? performance : Date).now();
     return {

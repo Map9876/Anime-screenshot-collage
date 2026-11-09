@@ -29,6 +29,14 @@
   </div>
 </section>
 
+<div id="lightbox" hidden>
+  <button type="button" class="lb-close" aria-label="关闭">×</button>
+  <button type="button" class="lb-prev" aria-label="上一张">←</button>
+  <img id="lb-img" alt="输入原图">
+  <button type="button" class="lb-next" aria-label="下一张">→</button>
+  <div id="lb-count" class="lb-count"></div>
+</div>
+
 <input id="file" type="file" accept="image/*" multiple hidden>
 <script src="stitch.js"></script>
 <script src="stitch_full.js"></script>

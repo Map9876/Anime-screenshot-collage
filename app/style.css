@@ -1,4 +1,8 @@
-*{box-sizing:border-box}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+[hidden]{display:none!important}
+::selection{background:transparent}
+button,a,img,canvas,figure,figcaption,.ph,.status,h1,h3{
+  -webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
 html{scroll-behavior:smooth}
 body{margin:0;background:#fff;color:#161616;
   font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
@@ -29,7 +33,7 @@ h1{font-size:clamp(30px,6.4vw,58px);font-weight:600;letter-spacing:-.035em;margi
 .card h3{font-size:17px;font-weight:600;margin:0 0 12px}
 .inputs{display:flex;gap:6px;overflow-x:auto;padding-bottom:8px;margin-bottom:14px;
   -webkit-overflow-scrolling:touch;scrollbar-width:thin}
-.inputs img{height:76px;width:auto;flex:none;border:1px solid #eee;display:block}
+.inputs img{height:76px;width:auto;flex:none;border:1px solid #eee;display:block;cursor:zoom-in}
 .run{font:inherit;font-size:14px;padding:10px 20px;border:1px solid #161616;border-radius:999px;
   background:#fff;color:#161616;cursor:pointer;min-height:42px}
 .run:hover{background:#161616;color:#fff}
@@ -42,8 +46,25 @@ h1{font-size:clamp(30px,6.4vw,58px);font-weight:600;letter-spacing:-.035em;margi
 .ph{color:#bbb;font-size:13px;padding:30px 0;display:block}
 .back{margin-top:26px;font-size:13px;color:#aaa}
 .back a{color:#777}
+#lightbox{position:fixed;inset:0;z-index:50;background:rgba(18,18,18,.94);
+  display:flex;align-items:center;justify-content:center;cursor:zoom-out}
+#lightbox img{max-width:86vw;max-height:84vh;object-fit:contain;cursor:default;
+  border:1px solid #333;background:#111}
+#lightbox button{position:absolute;font:inherit;color:#fff;background:rgba(255,255,255,.08);
+  border:1px solid rgba(255,255,255,.25);border-radius:999px;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;line-height:1}
+#lightbox button:hover{background:rgba(255,255,255,.2)}
+.lb-close{top:18px;right:20px;width:44px;height:44px;font-size:26px}
+.lb-prev,.lb-next{top:50%;transform:translateY(-50%);width:52px;height:52px;font-size:24px}
+.lb-prev{left:18px}
+.lb-next{right:18px}
+.lb-count{position:absolute;bottom:18px;left:0;right:0;text-align:center;
+  color:#bbb;font-size:13px;letter-spacing:.08em}
 @media (max-width:640px){
   .compare{grid-template-columns:1fr;gap:14px}
   .inputs img{height:64px}
   #hero{padding:6vh 5vw}
+  #lightbox img{max-width:92vw}
+  .lb-prev{left:8px}
+  .lb-next{right:8px}
 }

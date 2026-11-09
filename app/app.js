@@ -97,10 +97,49 @@
     }
   }
 
+  // 按钮、图片、链接、画布等交互区域不触发全屏上传，也不出现选中高亮
+  const NO_UPLOAD = 'button, a, input, canvas, img, figure, figcaption, [data-no-upload]';
   $('#hero').addEventListener('click', e => {
-    if (e.target.closest('button, a, input, canvas')) return;
+    if (e.target.closest(NO_UPLOAD)) return;
     fileInput.click();
   });
+
+  const lightbox = $('#lightbox');
+  const lbImg = $('#lb-img');
+  const lbCount = $('#lb-count');
+  const lbPrev = lightbox.querySelector('.lb-prev');
+  const lbNext = lightbox.querySelector('.lb-next');
+  let lbList = [], lbIdx = 0;
+
+  function lbShow() {
+    lbImg.src = lbList[lbIdx];
+    lbCount.textContent = (lbIdx + 1) + ' / ' + lbList.length;
+    lbPrev.hidden = lbNext.hidden = lbList.length < 2;
+  }
+  function openLightbox(list, idx) {
+    lbList = list; lbIdx = idx; lbShow(); lightbox.hidden = false;
+  }
+  function closeLightbox() {
+    lightbox.hidden = true;
+    lbImg.removeAttribute('src');
+  }
+  function lbStep(d) {
+    if (lbList.length < 2) return;
+    lbIdx = (lbIdx + d + lbList.length) % lbList.length;
+    lbShow();
+  }
+  lightbox.addEventListener('click', e => {
+    if (e.target === lightbox || e.target.closest('.lb-close')) { closeLightbox(); return; }
+    if (e.target.closest('.lb-prev')) { lbStep(-1); return; }
+    if (e.target.closest('.lb-next')) lbStep(1);
+  });
+  document.addEventListener('keydown', e => {
+    if (lightbox.hidden) return;
+    if (e.key === 'Escape') closeLightbox();
+    else if (e.key === 'ArrowLeft') lbStep(-1);
+    else if (e.key === 'ArrowRight') lbStep(1);
+  });
+
   fileInput.addEventListener('change', () => {
     runUpload(Array.from(fileInput.files));
     fileInput.value = '';
@@ -138,6 +177,9 @@
             <img src="${ex.ref}" loading="lazy" alt="参考输出"></figure>
         </div>`;
       box.appendChild(card);
+      card.querySelectorAll('.inputs img').forEach((img, i) => {
+        img.addEventListener('click', () => openLightbox(ex.inputs, i));
+      });
       const btn = card.querySelector('.run');
       const out = card.querySelector('.out');
       btn.addEventListener('click', async () => {
