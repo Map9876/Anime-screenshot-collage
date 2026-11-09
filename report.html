@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>拼接与黑块清理技术报告</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="brand" href="index.html">Anime Screenshot Collage <span class="sub">/ 技术报告</span></a>
+  <nav class="topnav">
+    <a href="index.html">完整对话</a>
+    <a href="devlog.html">用户怎么开发的?</a>
+    <a href="report.html" class="active">技术报告</a>
+    <a href="https://github.com/Map9876/Anime-screenshot-collage" target="_blank" rel="noopener">GitHub ↗</a>
+  </nav>
+</div></header>
+<main class="wrap">
+  <section class="hero"><h1>拼接与黑块清理技术报告</h1>
+    <p>从纯平移拼接到黑块清理、接缝曝光修复的完整算法与实测指标；Markdown 原文见 docs/拼接清理报告.md。</p></section>
+  <div class="msg"><div class="body"><p>两个素材目录：<code>亚丝娜镜头1</code>（6 帧垂直摇镜，6×2411×1200）、<code>亚丝娜镜头2</code>（3 帧，3×2134×1200，画面极淡）。<br>每帧先裁掉截图自带的 letterbox 黑边，再进入拼接。</p>
+<h2>1. 拼接：<code>src/translate_stitch.py</code></h2>
+<p>不用 <code>cv2.Stitcher</code> 的默认透视投影（会把人物头部拉宽、直线变弯），改用<strong>自由度最低的纯平移</strong>：</p>
+<ol><li><strong>自动裁黑边</strong> <code>crop_black_border</code>：按列/行的非黑比例保守裁切。不裁的话相位相关/SIFT 会被黑边钉死成 0 位移。</li><li><strong>自适应匹配</strong>：每对图用原图和 CLAHE 各跑一次纯平移 RANSAC，按<strong>内点率</strong>取更可靠者（冰晶用 CLAHE 内点多、水雾用原图内点率高）。</li><li><strong>布局</strong>：内点数作边权的 Kruskal 最大生成树，强边优先，避免淡图弱边把位置拉错。</li><li><strong>同帧去重</strong>：位移 ≈0 的一组只留 Laplacian 方差最大（最清晰）的一张。</li><li><strong>融合</strong>：<code>GraphCutSeamFinder</code>（<code>COST_COLOR_GRAD</code>）在 1/4 分辨率找接缝再上采样 mask，把边界藏到内容边缘。</li><li><strong>输出</strong>：<code>translate_stitched_raw.png</code>（原始画布）、<code>translate_stitched.png</code>（裁边版）、<code>seam_mask.png</code>。</li></ol>
+<p>实测结果：镜头1 → 3658×1953 全身像（头顶→脸→白裙→腿→脚）；镜头2 → 1650×2371 特写。</p>
+<h2>2. 清理：<code>src/clean_stitched.py</code></h2>
+<p>原始拼接图剩下三类问题：未覆盖的纯黑矩形、横向曝光台阶、四周 1~2px 亮/暗边线。</p>
+<h3>2.1 三个关键 bug</h3>
+<p><strong>① 暗部被误判成黑块 → 补成纯白</strong></p>
+<p>旧流程用 <code>gray &lt; 20</code> 判定「未覆盖区」，把镜头1 左上角本来就是暗蓝/暗红的背景（BGR≈<code>17,11,29</code>）当成黑块，LaMa 填成了 <code>(255,255,255)</code> 的一片白。<br>→ 改为<strong>三通道都 <code>&lt; 6</code></strong> 才算没被任何帧覆盖。画面暗部饱和度较高，很难三通道同时压到 6 以下。</p>
+<p><strong>② LaMa 输出被重复归一化</strong></p>
+<p><code>lama_fp32.onnx</code> 直接输出 <strong>0~255</strong>，旧代码又乘了一次 255 → 修补区全白（镜头2 左下角）。<br>→ 仅当 <code>out.max() &lt;= 1.5</code> 时才放大。</p>
+<p><strong>③ 裁切边界落在「暗部」而不是「纯黑」</strong></p>
+<p><code>gray&lt;20</code> 让裁切线提前，<strong>白扔了有效画面</strong>：镜头1 少 122px、镜头2 少 237px。修正后边界落在真正的纯黑起点（镜头1 x=1580、镜头2 x=2134）。</p>
+<h3>2.2 接缝曝光台阶</h3>
+<p>接缝两侧来自<strong>不同时间</strong>的帧，画面在变亮/变暗，形成横向硬边（实测镜头1 行均值突变 11.4、镜头2 突变 9.4 灰阶）。单一常数补偿不够——逐列实测差异从 -17 到 +17 都有，常数会在别处制造新断层。</p>
+<pre><code>逐列估计色差  S(x) = mean[y+1..y+6] - mean[y-6..y-1]        (W×3)
+      ↓ 沿 x 高斯平滑 (σ=40, 核 101px) → 平滑二维补偿场
+接缝处全额补偿，沿下方 T 行用 w(t) = (1 - t/T)² 衰减到 0
+      ↓ T = min(剩余高度, 700px)：镜头1 取 700、镜头2 取 451
+局部纵向柔化：接缝 ±5 行 σ=1.8 的 y 向高斯（横向完全不卷积，动画线条不糊）</code></pre>
+<p>要点是<strong>衰减而非截断</strong>：补偿量摊到 450~700 行，每行变化 &lt; 0.03 灰阶，肉眼不可察，也不会像直接剪切那样产生新台阶。</p>
+<h3>2.3 边线</h3>
+<p><code>warpAffine</code> 会在四周留下 1~2px 亮/暗线。旧判据「整行均值 &lt; 25」裁不掉只占部分行的黑线（实测首行均值 34.9、末行 53.9）。<br>→ 改成「近黑像素占比 ≥ 0.35」，再加一层<strong>相对判据</strong>：贴边行/列的均值与往里 3 行/列的均值差太多、或逐像素 MAE &gt; 7，就裁掉 1px（每边最多 4px）。</p>
+<h2>3. 结果</h2>
+<div class='table-wrap'><table><thead><tr><th>镜头</th><th>修复前</th><th>修复后</th><th>最大行跳变</th><th>最大列跳变</th><th>纯黑残留</th></tr></thead><tbody><tr><td>亚丝娜镜头1</td><td>1453×3653</td><td><strong>1573×3652</strong></td><td>11.4 → 4.9</td><td>7.4 → 2.9</td><td>0.00%</td></tr><tr><td>亚丝娜镜头2</td><td>1897×1649</td><td><strong>2131×1649</strong></td><td>9.4 → 1.8</td><td>9.4 → 2.5</td><td>0.00%</td></tr></tbody></table></div>
+<blockquote>修复后剩余的最大行跳变已不在接缝行，而是原画面本身的内容边缘。</blockquote>
+<p>校验：</p>
+<pre><code>python3 -c &quot;import cv2;im=cv2.imread(&#x27;results/亚丝娜镜头1_clean.png&#x27;);print((im.max(axis=2)&lt;8).mean()*100)&quot;
+# 0.0</code></pre>
+<h2>4. 遗留问题（数据本身限制）</h2>
+<ul><li>镜头2 的 bilibili 水印（右上 logo、<code>BV1oT411E7eg 01:14/01:47</code>、<code>01:11/01:47</code>）。背景是有细节的暖光，涂抹痕迹会比水印更明显，故保留。</li><li>镜头1 接缝 1:1 放大仍有极淡重影线——两帧重叠内容在接缝两侧轻微错位（非曝光问题，MSE 曲线无最优位移），整图观看不可见。</li><li>镜头1 左下红色模糊块、斜向蓝色光带是<strong>原画面内容</strong>，不是拼接缺陷。</li></ul></div></div>
+  <footer class="foot">由 <code>src/build_site.py</code> 从 <code>docs/拼接清理报告.md</code> 生成</footer>
+</main>
+</body>
+</html>

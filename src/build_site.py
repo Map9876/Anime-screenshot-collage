@@ -126,7 +126,7 @@ def inline(s: str) -> str:
     return s
 
 
-def md2html(md: str) -> str:
+def md2html(md: str, base: int = 2) -> str:
     lines = md.replace("\r\n", "\n").split("\n")
     out, i = [], 0
     bullet = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+")
@@ -155,7 +155,7 @@ def md2html(md: str) -> str:
             continue
         m = re.match(r"^(#{1,6})\s+(.*)$", st)
         if m:
-            lv = min(len(m.group(1)) + 2, 6)
+            lv = min(len(m.group(1)) + base, 6)
             out.append(f"<h{lv}>" + inline(m.group(2)) + f"</h{lv}>")
             i += 1
             continue
@@ -279,7 +279,7 @@ PAGE = """<!DOCTYPE html>
     <nav class="topnav">
       <a href="index.html" class="{{ACTIVE_INDEX}}">完整对话</a>
       <a href="devlog.html" class="{{ACTIVE_DEVLOG}}">用户怎么开发的?</a>
-      <a href="https://github.com/Map9876/Anime-screenshot-collage/blob/gh-pages/docs/%E6%8B%BC%E6%8E%A5%E6%B8%85%E7%90%86%E6%8A%A5%E5%91%8A.md" target="_blank" rel="noopener">技术报告 ↗</a>
+      <a href="report.html">技术报告</a>
       <a href="https://github.com/Map9876/Anime-screenshot-collage" target="_blank" rel="noopener">GitHub ↗</a>
     </nav>
   </div>
@@ -339,6 +339,45 @@ def write_page(path, title, subtitle, stats, messages, user_nav, all_nav, devlog
     print("写出", path.relative_to(ROOT), f"{len(h)/1024:.0f} KB")
 
 
+REPORT_PAGE = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>拼接与黑块清理技术报告</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<header class="topbar"><div class="wrap">
+  <a class="brand" href="index.html">Anime Screenshot Collage <span class="sub">/ 技术报告</span></a>
+  <nav class="topnav">
+    <a href="index.html">完整对话</a>
+    <a href="devlog.html">用户怎么开发的?</a>
+    <a href="report.html" class="active">技术报告</a>
+    <a href="https://github.com/Map9876/Anime-screenshot-collage" target="_blank" rel="noopener">GitHub ↗</a>
+  </nav>
+</div></header>
+<main class="wrap">
+  <section class="hero"><h1>拼接与黑块清理技术报告</h1>
+    <p>从纯平移拼接到黑块清理、接缝曝光修复的完整算法与实测指标；Markdown 原文见 docs/拼接清理报告.md。</p></section>
+  <div class="msg"><div class="body">{{BODY}}</div></div>
+  <footer class="foot">由 <code>src/build_site.py</code> 从 <code>docs/拼接清理报告.md</code> 生成</footer>
+</main>
+</body>
+</html>
+"""
+
+
+def build_report():
+    src = ROOT / "docs" / "拼接清理报告.md"
+    if not src.exists():
+        return
+    body = re.sub(r"^# .*\n", "", src.read_text(encoding="utf-8"), count=1)
+    out = REPORT_PAGE.replace("{{BODY}}", md2html(body, base=0))
+    (ROOT / "report.html").write_text(out, encoding="utf-8")
+    print("写出 report.html", f"{len(out)/1024:.0f} KB")
+
+
 def main():
     turns = load_turns()
     real = [t for t in turns if t["kind"] == "user"]
@@ -383,6 +422,7 @@ def main():
             head += f" · {t['model']}"
         lines += [head, "", t["user"], ""]
     (ROOT / "devlog.md").write_text("\n".join(lines), encoding="utf-8")
+    build_report()
     print("写出 devlog.md / data/*.json")
     print(f"统计：{len(turns)} 轮，用户发言 {len(real)} 条，上下文摘要 {ctx} 条，导航条目 {len(user_nav)}")
 

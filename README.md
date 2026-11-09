@@ -67,6 +67,7 @@ git push origin gh-pages                  # Pages 自动重新构建
 
 ```
 ├── index.html / devlog.html / devlog.md   # 对话网页 / 开发日志（网页版 + Markdown 版）
+├── report.html                           # 技术报告网页版（由 docs/*.md 渲染，站内直达）
 ├── assets/style.css, app.js              # 样式 + 悬浮目录交互（原生 JS，无 CDN）
 ├── data/
 │   ├── conversation-export-20261104.json # 原始对话导出（42 MB，原样保留）
