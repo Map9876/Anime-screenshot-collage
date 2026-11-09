@@ -282,6 +282,7 @@ PAGE = """<!DOCTYPE html>
       <a href="index.html" class="{{ACTIVE_INDEX}}">完整对话</a>
       <a href="devlog.html" class="{{ACTIVE_DEVLOG}}">用户怎么开发的?</a>
       <a href="report.html">技术报告</a>
+      <a href="app/">网页拼接 ↗</a>
       <a href="https://github.com/Map9876/Anime-screenshot-collage" target="_blank" rel="noopener">GitHub ↗</a>
     </nav>
   </div>
@@ -292,6 +293,7 @@ PAGE = """<!DOCTYPE html>
     <h1>{{TITLE}}</h1>
     <p>{{SUBTITLE}}</p>
     <div class="stats">{{STATS}}</div>
+    <div class="webentry"><a href="app/">打开极简网页版 · 点击上传截图，实时拼接 →</a></div>
   </section>
   <div id="messages">{{MESSAGES}}</div>
   <footer class="foot">由 <code>src/build_site.py</code> 从对话导出文件生成 · 原始导出见 <code>data/</code></footer>
@@ -357,6 +359,7 @@ REPORT_PAGE = """<!DOCTYPE html>
     <a href="index.html">完整对话</a>
     <a href="devlog.html">用户怎么开发的?</a>
     <a href="report.html" class="active">技术报告</a>
+      <a href="app/">网页拼接 ↗</a>
     <a href="https://github.com/Map9876/Anime-screenshot-collage" target="_blank" rel="noopener">GitHub ↗</a>
   </nav>
 </div></header>

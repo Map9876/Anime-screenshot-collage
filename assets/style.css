@@ -121,3 +121,6 @@ body.only-mine .ai-msg, body.only-mine .context-msg, body.only-mine .tools { dis
   .hero h1 { font-size: 22px; }
   .msg { padding: 12px 14px; }
 }
+
+.webentry{margin-top:20px}
+.webentry a{display:inline-block;padding:11px 20px;border:1px solid currentColor;border-radius:999px;text-decoration:none;font-size:14px;opacity:.85}
