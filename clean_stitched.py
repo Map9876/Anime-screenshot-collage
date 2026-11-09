@@ -9,14 +9,28 @@
 
 用法: python clean_stitched.py 亚丝娜镜头1 亚丝娜镜头2
 """
+import argparse
 import os
 import sys
+from pathlib import Path
 
 import cv2
 import numpy as np
 import onnxruntime as ort
 
-MODEL = "/workspace/anime/models/lama_fp32.onnx"
+# 模型路径可移植：优先脚本同目录，再退回原来的工作区绝对路径（兼容旧环境）
+DEFAULT_MODEL = Path(__file__).resolve().parent / "models" / "lama_fp32.onnx"
+
+
+def resolve_model(model=None):
+    p = Path(model) if model else DEFAULT_MODEL
+    if p.exists():
+        return p
+    legacy = Path("/workspace/anime/models/lama_fp32.onnx")
+    if legacy.exists():
+        return legacy
+    raise FileNotFoundError(
+        f"找不到 LaMa 模型：{p}（用 --model 指定，或把 lama_fp32.onnx 放到 models/）")
 # 「没被任何帧覆盖」的区域是纯黑 (0,0,0)；画面本身的暗部（暗蓝/暗红）不是纯黑，
 # 用 max(B,G,R) < 6 才能把两者分开，否则会把暗背景当成缺口去补（会补成一片白）。
 UNCOVERED_MAX = 6
@@ -191,7 +205,7 @@ def trim_edge_lines(img, max_px=4, rel=0.85, absdiff=8.0, mae_tol=7.0):
     return img
 
 
-def clean(raw_path, out_path):
+def clean(raw_path, out_path, model=None, seam=True):
     im = cv2.imread(raw_path)
     H, W = im.shape[:2]
     lab, comps = black_components(im)
@@ -224,7 +238,7 @@ def clean(raw_path, out_path):
         mask[lab == c["id"]] = 255
     if mask.any():
         mask = cv2.dilate(mask, np.ones((9, 9), np.uint8))
-        sess = ort.InferenceSession(MODEL, providers=["CPUExecutionProvider"])
+        sess = ort.InferenceSession(str(resolve_model(model)), providers=["CPUExecutionProvider"])
         out = lama_inpaint(base, mask, sess)
         m = mask > 0
         pm = out[m].mean(axis=0)
@@ -238,19 +252,34 @@ def clean(raw_path, out_path):
     # 3) 去四周 1~2px 的暗边/亮边
     out = trim_edge_lines(trim_dark_edges(out))
 
-    # 4) 横向接缝曝光补偿
-    out = seam_fix(out)
-    cv2.imwrite(out_path, out)
+    # 4) 横向接缝曝光补偿（安全网；拼接阶段已做逐帧光度对齐后通常只剩很小残差）
+    if seam:
+        out = seam_fix(out)
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(out_path), out)
     print('  ->', out_path, out.shape)
+    return out
 
 
 def main():
-    dirs = sys.argv[1:] or ["亚丝娜镜头1", "亚丝娜镜头2"]
-    root = "/workspace/anime"
-    for d in dirs:
-        print('==', d)
-        clean(os.path.join(root, d, "translate_stitched_raw.png"),
-              os.path.join(root, d, "translate_stitched_clean.png"))
+    ap = argparse.ArgumentParser(description="清理拼接图的黑块与接缝")
+    ap.add_argument('inputs', nargs='*', help='目录 或 translate_stitched_raw.png 路径（可多个）')
+    ap.add_argument('--model', help='LaMa onnx 路径（默认脚本同目录 models/lama_fp32.onnx）')
+    ap.add_argument('--out', help='输出目录（默认与各自 raw 同目录）')
+    ap.add_argument('--no-seam', action='store_true', help='跳过接缝曝光补偿')
+    a = ap.parse_args()
+    here = Path(__file__).resolve().parent
+    inputs = a.inputs or [str(here / '亚丝娜镜头1'), str(here / '亚丝娜镜头2')]
+    for src in inputs:
+        p = Path(src)
+        raw = p / 'translate_stitched_raw.png' if p.is_dir() else p
+        if not raw.exists():
+            print(f'跳过（{raw} 不存在）')
+            continue
+        outdir = Path(a.out) if a.out else raw.parent
+        out = outdir / f'{raw.stem.replace("_raw", "")}_clean.png'
+        print('==', raw)
+        clean(str(raw), str(out), model=a.model, seam=not a.no_seam)
 
 
 if __name__ == "__main__":

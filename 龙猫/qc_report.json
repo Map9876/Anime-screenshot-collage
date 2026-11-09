@@ -1,0 +1,38 @@
+{
+  "stitched": {
+    "size": [
+      2370,
+      2068
+    ],
+    "mean_luma": 108.88,
+    "uncovered_black_pct": 6.1988,
+    "max_row_jump": 22.84,
+    "max_row_jump_at": 0,
+    "max_col_jump": 20.1,
+    "max_col_jump_at": 256
+  },
+  "raw": {
+    "size": [
+      2402,
+      2069
+    ],
+    "mean_luma": 108.23,
+    "uncovered_black_pct": 6.7063,
+    "max_row_jump": 26.55,
+    "max_row_jump_at": 2067,
+    "max_col_jump": 20.1,
+    "max_col_jump_at": 272
+  },
+  "clean": {
+    "size": [
+      2130,
+      2061
+    ],
+    "mean_luma": 116.61,
+    "uncovered_black_pct": 0.0,
+    "max_row_jump": 4.17,
+    "max_row_jump_at": 1,
+    "max_col_jump": 1.32,
+    "max_col_jump_at": 287
+  }
+}

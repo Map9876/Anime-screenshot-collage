@@ -15,7 +15,7 @@
 import cv2, numpy as np, os, glob, sys
 from collections import deque
 
-d = '/workspace/anime'
+d = os.path.dirname(os.path.abspath(__file__))
 
 
 def crop_black_border(im, thresh=18, ratio=0.5):
@@ -243,7 +243,125 @@ def accumulate_blend(ims, pos, use_multiband=True):
     return np.clip(out, 0, 255).astype(np.uint8)
 
 
-def accumulate_seam(ims, pos):
+def _pair_photometry(ref, cur, ov, max_samples=150000):
+    """估计「把 cur 对齐到 ref」的逐通道仿射光度参数 gain / offset。
+
+    只在重叠区采样，避开未覆盖的纯黑和过曝像素；gain 用标准差比但向 1 收缩
+    （重叠内容本身可能有视差，直接用 std 比会过冲），offset 用中位数差更稳健。
+    """
+    idx = np.flatnonzero(ov.ravel())
+    if idx.size < 2000:
+        return None
+    if idx.size > max_samples:
+        idx = np.random.default_rng(0).choice(idx, max_samples, replace=False)
+    a = ref.reshape(-1, 3)[idx].astype(np.float32)
+    b = cur.reshape(-1, 3)[idx].astype(np.float32)
+    ok = (a.max(axis=1) < 250) & (b.max(axis=1) < 250) & \
+         (a.min(axis=1) > 8) & (b.min(axis=1) > 8)
+    a, b = a[ok], b[ok]
+    if a.shape[0] < 1000:
+        return None
+    # 最小二乘斜率比「标准差比」更贴合真实的曝光仿射关系；向 1 略收缩以抵抗视差，
+    # offset 用中位数差（抗局部内容不一致）。
+    vx = b.var(axis=0)
+    cov = (a * b).mean(axis=0) - a.mean(axis=0) * b.mean(axis=0)
+    ls = np.where(vx > 1.0, cov / np.maximum(vx, 1.0), 1.0)
+    gain = np.clip(1.0 + 0.85 * (ls - 1.0), 0.70, 1.40).astype(np.float32)
+    off = np.clip(np.median(a - gain * b, axis=0), -40, 40).astype(np.float32)
+    return gain, off
+
+
+def exposure_chain(src, masks, anchor=0, verbose=True):
+    """沿「重叠最大生成树」把各帧光度串到同一基准，返回每帧 (gain, offset)。
+
+    旧实现只把每帧和 src[0] 比：中间帧与第 0 帧根本没有重叠（垂直摇镜时很常见），
+    ov.sum() <= 200 就直接跳过补偿 —— 这正是拼接后出现横向曝光台阶的根因。
+    这里改成：任意有重叠的两帧之间估计相对光度，按重叠像素数做最大生成树，
+    再从 anchor 沿树传播，使**相邻帧在重叠区一致**，而不是只对齐第一帧。
+    """
+    n = len(src)
+    rel = {}
+    edges = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            ov = (masks[i] > 0) & (masks[j] > 0)
+            cnt = int(ov.sum())
+            if cnt < 20000:
+                continue
+            r = _pair_photometry(src[i], src[j], ov)
+            if r is None:
+                continue
+            rel[(i, j)] = r          # src[i] ≈ gain * src[j] + off
+            edges.append((cnt, i, j))
+    if not edges:
+        return [(np.ones(3, np.float32), np.zeros(3, np.float32)) for _ in range(n)]
+    edges.sort(reverse=True)
+    parent = list(range(n))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    adj = {i: [] for i in range(n)}
+    for cnt, i, j in edges:
+        ri, rj = find(i), find(j)
+        if ri != rj:
+            parent[ri] = rj
+            adj[i].append((j, True))     # True: i 是 ref（已存 rel[i,j]）
+            adj[j].append((i, False))    # False: 需要反变换
+    A = [np.ones(3, np.float32) for _ in range(n)]
+    B = [np.zeros(3, np.float32) for _ in range(n)]
+    seen = {anchor}
+    q = deque([anchor])
+    while q:
+        p = q.popleft()
+        for c, forward in adj[p]:
+            if c in seen:
+                continue
+            seen.add(c)
+            if forward:                       # rel[(p, c)] 存在：p ≈ g*c + o
+                g, o = rel[(p, c)]
+                A[c] = A[p] * g
+                B[c] = A[p] * o + B[p]
+            else:                             # rel[(c, p)] 存在，需取逆
+                g, o = rel[(c, p)]
+                A[c] = A[p] / g
+                B[c] = B[p] - A[p] * o / g
+            q.append(c)
+    if verbose:
+        for k in range(n):
+            print(f"  曝光补偿 帧{k}: gain={np.round(A[k], 3)} offset={np.round(B[k], 1)}")
+    return list(zip(A, B))
+
+
+def seam_cost(out, seam=None):
+    """评价拼接图在**接缝行**上的横向台阶。
+
+    单帧一个仿射光度参数对「整体曝光变化」有效，但对画面里有大范围渐变光晕
+    （镜头2 的金色光球）反而可能把接缝拉大。因此用它做 A/B 判据，自动决定是否启用。
+    只看 GraphCut 标出的接缝带，避免被别处的内容边缘/黑区边界带偏。
+    """
+    g = cv2.cvtColor(out, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    # 只按「有效像素」求行均值：未覆盖的纯黑区域不能把行均值拉低，
+    # 否则黑角块的边界会伪装成一条巨大的曝光台阶，误导 A/B 选择。
+    valid = out.max(axis=2) > 8
+    prof = (g * valid).sum(axis=1) / np.maximum(valid.sum(axis=1), 1)
+    d = np.abs(np.diff(prof))
+    d[:12] = 0
+    d[-20:] = 0
+    bad = valid.mean(axis=1) < 0.5             # 有效像素太少的行不参与
+    d[bad[:-1] | bad[1:]] = 0
+    if seam is not None:
+        srow = (seam > 0).mean(axis=1).astype(np.float32)
+        if srow.max() > 0.1:
+            focus = srow > max(0.15, srow.max() * 0.4)
+            d = d * (focus[:-1] | focus[1:])
+    return float(d.max())                       # 接缝带上的最大跳变
+
+
+def accumulate_seam(ims, pos, photometry=True):
     """用 GraphCutSeamFinder 沿内容找最优接缝（而非矩形边），再按归属合成。
 
     这是 OpenCV Stitcher 源码中 seam_finders.cpp 的思路：在重叠区用最小割
@@ -266,15 +384,12 @@ def accumulate_seam(ims, pos):
         m = cv2.warpAffine(np.ones(im.shape[:2], np.uint8) * 255, M, (W, H),
                           flags=cv2.INTER_LINEAR, borderValue=0)
         src.append(warped); masks.append(m)
-    # 光度（曝光/颜色）补偿：把各图在重叠区的通道均值对齐到参考图，减少亮度/色差接缝
-    if len(src) > 1:
-        ref = src[0]; refm = masks[0] > 0
-        for k in range(1, len(src)):
-            ov = (masks[k] > 0) & refm
-            if ov.sum() > 200:
-                for c in range(3):
-                    g = float(ref[ov][:, c].mean()) / max(float(src[k][ov][:, c].mean()), 1e-3)
-                    src[k][:, :, c] *= np.clip(g, 0.5, 2.0)
+    # 光度（曝光/颜色）补偿：沿重叠最大生成树把每帧串到同一基准，
+    # 保证「会相邻的两帧」在重叠区一致；补偿只作用于有效像素，未覆盖区保持纯黑。
+    if photometry and len(src) > 1:
+        for k, (gain, off) in enumerate(exposure_chain(src, masks)):
+            keep = (masks[k] > 0)[..., None]
+            src[k] = np.where(keep, src[k] * gain + off, src[k])
     corners = [(0, 0)] * n
     finder = cv2.detail.GraphCutSeamFinder('COST_COLOR_GRAD')
     # 大图图割很慢：在 1/4 分辨率找接缝，再上采样 mask（加速 ~16x）
@@ -327,39 +442,54 @@ def make_staircase_demo():
     print("staircase_demo.png  frames=", len(frames), " shape", demo.shape)
 
 
-def main():
-    args = [a for a in sys.argv[1:] if not a.startswith('--')]
-    if args and os.path.isdir(args[0]):
-        outdir = args[0]
-        files = sorted(glob.glob(os.path.join(outdir, '*.png')))
+SKIP_OUTPUTS = ('translate_stitched', 'seam_mask', 'compare_inpaint',
+                'stitched_auto', 'stitched_final', 'baseline_global', 'qc_report')
+
+
+def discover_images(src):
+    """接受目录或 glob；排除历史输出，避免把上一轮结果当输入。"""
+    if os.path.isdir(src):
+        files = sorted(glob.glob(os.path.join(src, '*.png')))
     else:
-        outdir = d
-        pat = args[0] if args else 'image.*.png'
-        files = sorted(glob.glob(os.path.join(d, pat)))
-    _skip = ('translate_stitched', 'seam_mask', 'compare_inpaint')
-    files = [f for f in files if not any(k in os.path.basename(f) for k in _skip)]
+        files = sorted(glob.glob(src))
+    return [f for f in files
+            if not any(k in os.path.basename(f) for k in SKIP_OUTPUTS)]
+
+
+def stitch_files(files, outdir, mode='seam', photometry=True, demo=False):
+    """核心拼接流程（可被其它脚本 import 复用）。
+
+    返回 dict：stitched / raw / seam / n_frames / layout。
+    raw 是**未裁边**的原始画布，供 clean_stitched.py 做黑区清理；所有模式都写。
+    """
+    os.makedirs(outdir, exist_ok=True)
+    files = [f for f in files if not any(k in os.path.basename(f) for k in SKIP_OUTPUTS)]
     assert files, "no image files found"
+    raw_p = os.path.join(outdir, 'translate_stitched_raw.png')
+    st_p = os.path.join(outdir, 'translate_stitched.png')
+    seam_p = os.path.join(outdir, 'seam_mask.png')
+
     ims = [crop_black_border(cv2.imread(f)) for f in files]
     print(f"输入 {len(ims)} 张（顺序无关，黑盒）：")
     for f in files:
         print("  ", os.path.basename(f))
     pos, anchor = auto_layout(ims)
     print("自动布局（谁上谁下由重叠关系决定，anchor=", os.path.basename(files[anchor]), "）：", pos)
-    # 同帧去重：位移<2px 的图组只保留最清晰的一张（避免淡图覆盖清晰图）
+
+    # 同帧去重：位移<2px 的图组只保留最清晰的一张
     keep = list(range(len(ims)))
-    if len(ims) > 1:
-        for i in range(len(ims)):
-            for j in range(i + 1, len(ims)):
-                if i in keep and j in keep and \
-                   abs(pos[i][0] - pos[j][0]) + abs(pos[i][1] - pos[j][1]) < 2.0:
-                    si = float(cv2.Laplacian(cv2.cvtColor(ims[i], cv2.COLOR_BGR2GRAY), cv2.CV_64F).var())
-                    sj = float(cv2.Laplacian(cv2.cvtColor(ims[j], cv2.COLOR_BGR2GRAY), cv2.CV_64F).var())
-                    keep.remove(j if si >= sj else i)
+    for i in range(len(ims)):
+        for j in range(i + 1, len(ims)):
+            if i in keep and j in keep and \
+               abs(pos[i][0] - pos[j][0]) + abs(pos[i][1] - pos[j][1]) < 2.0:
+                si = float(cv2.Laplacian(cv2.cvtColor(ims[i], cv2.COLOR_BGR2GRAY), cv2.CV_64F).var())
+                sj = float(cv2.Laplacian(cv2.cvtColor(ims[j], cv2.COLOR_BGR2GRAY), cv2.CV_64F).var())
+                keep.remove(j if si >= sj else i)
     if len(keep) < len(ims):
         print(f"同帧去重：{len(ims)} -> {len(keep)} 张（保留更清晰）")
         ims = [ims[k] for k in keep]
         pos = {n: pos[k] for n, k in enumerate(keep)}
-    # 自动判断：若所有图几乎同帧（位移跨度极小），拼接无意义 → 选最清晰的一张
+
     pv = [pos[i] for i in pos]
     span = (max(max(p[0] for p in pv) - min(p[0] for p in pv),
                 max(p[1] for p in pv) - min(p[1] for p in pv)) if pv else 0)
@@ -368,29 +498,54 @@ def main():
         sharp = [float(cv2.Laplacian(cv2.cvtColor(im, cv2.COLOR_BGR2GRAY), cv2.CV_64F).var())
                  for im in ims]
         best = int(np.argmax(sharp))
-        print("  最优帧:", os.path.basename(files[best]), "sharpness", round(sharp[best], 1))
         out = trim_dark_edges(crop_black_border(ims[best]))
-        cv2.imwrite(os.path.join(outdir, 'translate_stitched.png'), out)
-        print(os.path.join(outdir, 'translate_stitched.png'), out.shape)
-        return
-    # 默认自动：GraphCut 接缝（效果最好，内部 1/4 下采样加速），输入无需任何参数；
-    # --multiband / --feather / --seam 作为技术手段单独保留。
-    if '--multiband' in sys.argv:
+        cv2.imwrite(raw_p, out)
+        cv2.imwrite(st_p, out)
+        print(st_p, out.shape)
+        return {"stitched": st_p, "raw": raw_p, "seam": None,
+                "n_frames": 1, "layout": pos}
+
+    if mode == 'multiband':
         out = accumulate_blend(ims, pos, use_multiband=True)
-        name = 'translate_stitched_multiband.png'
-    elif '--feather' in sys.argv:
+        seam = None
+    elif mode == 'feather':
         out = accumulate_blend(ims, pos, use_multiband=False)
-        name = 'translate_stitched_feather.png'
-    else:  # 默认 & --seam：自动图割接缝
-        out, seam = accumulate_seam(ims, pos)
-        cv2.imwrite(os.path.join(outdir, 'translate_stitched_raw.png'), out)
-        cv2.imwrite(os.path.join(outdir, 'seam_mask.png'), seam)
-        name = 'translate_stitched.png'
-    out = trim_dark_edges(crop_black_border(out))
-    cv2.imwrite(os.path.join(outdir, name), out)
-    print(os.path.join(outdir, name), out.shape)
-    if '--demo' in sys.argv:
+        seam = None
+    elif photometry == 'auto':
+        off, seam_off = accumulate_seam(ims, pos, photometry=False)
+        on, seam_on = accumulate_seam(ims, pos, photometry=True)
+        c_off, c_on = seam_cost(off, seam_off), seam_cost(on, seam_on)
+        better = '启用' if c_on < c_off * 0.98 else '跳过'
+        print(f"  逐帧曝光补偿 A/B：关闭 {c_off:.2f} / 开启 {c_on:.2f} → {better}")
+        out, seam = (on, seam_on) if better == '启用' else (off, seam_off)
+    else:
+        out, seam = accumulate_seam(ims, pos, photometry=bool(photometry))
+    cv2.imwrite(raw_p, out)                     # 未裁边原始画布
+    if seam is not None:
+        cv2.imwrite(seam_p, seam)
+    stitched = trim_dark_edges(crop_black_border(out))
+    cv2.imwrite(st_p, stitched)
+    print(st_p, stitched.shape)
+    if demo:
         make_staircase_demo()
+    return {"stitched": st_p, "raw": raw_p,
+            "seam": seam_p if seam is not None else None,
+            "n_frames": len(ims), "layout": pos}
+
+
+def main():
+    args = [a for a in sys.argv[1:] if not a.startswith('--')]
+    if args and os.path.isdir(args[0]):
+        outdir = args[0]
+    else:
+        outdir = d
+    src = args[0] if args else os.path.join(d, 'image.*.png')
+    mode = ('multiband' if '--multiband' in sys.argv else
+            'feather' if '--feather' in sys.argv else 'seam')
+    photometry = ('off' if '--no-photometry' in sys.argv else
+                  'on' if '--photometry' in sys.argv else 'auto')
+    stitch_files(discover_images(src), outdir, mode=mode,
+                 photometry=photometry, demo='--demo' in sys.argv)
 
 
 if __name__ == '__main__':
